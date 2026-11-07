@@ -1,0 +1,200 @@
+name: CI & Release Pipeline
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust Cache
+        # No cache on tag builds: release binaries are built from a clean state.
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Check code formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy (default features)
+        shell: bash
+        run: .github/scripts/run-with-annotations.sh "clippy default" cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run clippy (all features)
+        shell: bash
+        run: .github/scripts/run-with-annotations.sh "clippy all features" cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Run tests (default features)
+        shell: bash
+        run: .github/scripts/run-with-annotations.sh "tests default" cargo test --workspace --all-targets --locked --no-fail-fast
+
+      - name: Run tests (all features)
+        shell: bash
+        run: .github/scripts/run-with-annotations.sh "tests all features" cargo test --workspace --all-targets --all-features --locked --no-fail-fast
+
+      - name: Build release binaries
+        run: cargo build --workspace --release --locked
+
+  real-server:
+    name: Real MCP servers (filesystem, git, everything)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Install the git MCP server
+        run: python -m pip install mcp-server-git
+      - name: Build moat
+        run: cargo build --release --locked --bin moat
+      - name: Run moat in front of the real servers
+        run: python scripts/real_server_check.py target/release/moat
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [ test, real-server ]
+    # Tags build the release. A manual run (workflow_dispatch) builds the same archives as a dry run
+    # (no release is created for it).
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: moat-linux-x86_64.tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: moat-macos-aarch64.tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: moat-macos-x86_64.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: moat-windows-x86_64.zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin moat --target ${{ matrix.target }}
+
+      - name: Verify binary architecture
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/moat"
+          file "$bin"
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu) file "$bin" | grep -q "x86-64" ;;
+            aarch64-apple-darwin)     test "$(lipo -archs "$bin")" = "arm64" ;;
+            x86_64-apple-darwin)      test "$(lipo -archs "$bin")" = "x86_64" ;;
+          esac
+
+      - name: Smoke test binary
+        # The x86_64 macOS binary is cross-built on an arm64 runner and is not run here.
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/moat"
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          "$bin" --version
+          "$bin" --help > /dev/null
+
+      - name: Package Linux / macOS archive
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir dist
+          cp target/${{ matrix.target }}/release/moat dist/
+          cp LICENSE README.md SECURITY.md moat.toml dist/
+          tar -czvf ${{ matrix.artifact_name }} -C dist .
+
+      - name: Package Windows archive
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/moat.exe, LICENSE, README.md, SECURITY.md, moat.toml -Destination dist
+          Compress-Archive -Path dist/* -DestinationPath ${{ matrix.artifact_name }}
+
+      - name: Upload archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create SHA256SUMS
+        working-directory: artifacts
+        run: |
+          ls -l
+          sha256sum moat-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: |
+            artifacts/moat-*
+            artifacts/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

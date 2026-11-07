@@ -1,0 +1,83 @@
+# ==============================================================================
+# mcp-moat Security Configuration (moat.toml)
+# Zero-Trust Stdio/TTY Runtime Firewall for Model Context Protocol (MCP)
+# ==============================================================================
+
+# Allowed root paths for filesystem access (path jailing).
+# Relative paths are resolved against the current working directory.
+# Paths outside this boundary are blocked with fail-closed security errors.
+allowed_paths = ["."]
+
+# Enforce strict read-only mode across all tools.
+# When set to true, all modifying operations (write, edit, delete, append) are prohibited.
+read_only = false
+
+# Require explicit operator approval (via direct TTY console) for file write actions,
+# even if the target file is located inside an allowed path.
+# Sensitive system files (e.g., moat.toml, .git, .env) ALWAYS require approval regardless.
+require_approval_on_write = false
+
+# Destructive shell command patterns that are blocked immediately (case-insensitive).
+blocked_commands = [
+    "rm -rf /",
+    ":(){ :|:& };:",
+    "mkfs",
+    "dd if=/dev/zero",
+    "format c:",
+    "powershell -enc",
+]
+
+# Read-only tools that are whitelisted and never require interactive operator approval.
+# Unrecognized tools not in this list and not performing verified path-bound writes
+# fail-closed according to zero-trust principles.
+always_allow_tools = [
+    "list_directory",
+    "read_file",
+    "search_files",
+    "grep",
+]
+
+# Tools whose names look like file tools (read_*, get_*, list_*, ...) but that take no path,
+# for example "get-sum". Without this list a call of such a tool is blocked, because moat
+# cannot find a path to check. List only tools you know.
+# non_file_tools = ["get-sum"]
+
+# Argument names that look like paths but are not (for example a git revision called "target").
+# The git preset already sets the common ones.
+# ignore_path_keys = ["target"]
+
+# Forensic Audit Logging & Tamper-Evidence (SHA-256 Hash-Chaining)
+# When set, all incoming/outgoing MCP messages, decisions, and DLP redactions
+# are recorded to this file with sequential cryptographic hash chaining.
+# audit_log = ".moat/audit.jsonl"
+
+# Granularity of forensic audit logging: "full", "decisions_only", or "violations_only"
+audit_level = "full"
+
+# ==============================================================================
+# Token-Moat & Context Budget (Schema Slimming & Output Guard)
+# ==============================================================================
+
+# Compact bloated `tools/list` JSON schemas on-the-fly ($schema, title, examples,
+# verbose descriptions) and automatically prune modifying tools when `read_only = true`.
+compact_schemas = false
+
+# Optional maximum byte budget per tool/resource text output to prevent context-window
+# token explosions (e.g., 16384 for 16 KB). Omit or comment out for unlimited output.
+# max_output_bytes = 16384
+
+# Explicitly hide specific tools from `tools/list` discovery AND block them on `tools/call`.
+hidden_tools = []
+
+# ==============================================================================
+# Server Profiles & Presets
+# Preconfigured security profiles can be invoked via CLI `--preset <name>`
+# Built-in presets available: filesystem, git, fetch, sqlite, memory
+# Custom presets can be defined or overridden below:
+# ==============================================================================
+# [presets.custom_git]
+# read_only = false
+# blocked_commands = ["git push --force", "git reset --hard", "git clean -fdx"]
+# always_allow_tools = ["git_status", "git_diff", "git_log"]
+# custom_modifying_tools = ["git_commit", "git_checkout"]
+

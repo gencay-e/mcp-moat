@@ -1,0 +1,46 @@
+[package]
+name = "mcp-moat-proxy"
+description = "Tokio NDJSON stream engine, keepalive ping-bypass, and autonomous stderr draining for mcp-moat"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+autotests = false
+
+[dependencies]
+mcp-moat-core = { path = "../mcp-moat-core", version = "0.1.0" }
+mcp-moat-tty = { path = "../mcp-moat-tty", version = "0.1.0" }
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+tokio-stream = "0.1.19"
+
+[[bin]]
+name = "mock_server"
+path = "tests/mock_server.rs"
+test = false
+
+[[test]]
+name = "stream_test"
+path = "tests/stream_test.rs"
+
+[[test]]
+name = "stress_simulation"
+path = "tests/stress_simulation.rs"
+
+[[test]]
+name = "sse_test"
+path = "tests/sse_test.rs"
+
+[[test]]
+name = "adversarial_fuzz_stress"
+path = "tests/adversarial_fuzz_stress.rs"
+

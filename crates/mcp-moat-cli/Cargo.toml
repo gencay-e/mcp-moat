@@ -1,12 +1,11 @@
 [package]
 name = "mcp-moat"
-description = "Zero-Trust Stdio/TTY Runtime Firewall and Proxy for Model Context Protocol (MCP)"
+description = "Stdio policy proxy for Model Context Protocol (MCP) servers"
 readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-publish.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true

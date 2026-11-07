@@ -1,11 +1,11 @@
 [package]
 name = "mcp-moat-tty"
-description = "Direct console (CONIN$/dev/tty), unified color diffs, and session approval caching for mcp-moat"
+description = "Terminal prompts (/dev/tty and CONIN$), unified diffs, and session approval cache for mcp-moat"
+readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-publish.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true

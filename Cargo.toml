@@ -12,13 +12,11 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Gencay"]
 license = "MIT"
-# Not published to crates.io for now. Remove this line to publish.
-publish = false
 repository = "https://github.com/gencay-e/mcp-moat"
 homepage = "https://github.com/gencay-e/mcp-moat"
 readme = "README.md"
-description = "Zero-Trust Stdio/TTY Runtime Firewall & Token-Moat for MCP and Code-Mode Agents"
-keywords = ["mcp", "security", "firewall", "proxy", "ai-agents"]
+description = "Stdio policy proxy for Model Context Protocol (MCP) servers"
+keywords = ["mcp", "security", "proxy", "cli", "ai-agents"]
 categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]

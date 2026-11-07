@@ -1,5 +1,6 @@
 # mcp-moat (`moat`)
 
+[![Crates.io](https://img.shields.io/crates/v/mcp-moat.svg)](https://crates.io/crates/mcp-moat)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![CI](https://github.com/gencay-e/mcp-moat/actions/workflows/ci.yml/badge.svg)](https://github.com/gencay-e/mcp-moat/actions/workflows/ci.yml)
 
@@ -89,7 +90,9 @@ Reads `tools/list` from a running server or from a JSON file, applies the policy
 
 ## Install
 
-There is no installer script and no crates.io release yet.
+```bash
+cargo install --locked mcp-moat
+```
 
 ### From a release
 

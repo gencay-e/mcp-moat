@@ -1,11 +1,11 @@
 [package]
 name = "mcp-moat-core"
-description = "Security policy engine, path jailing, and AST-DLP for mcp-moat"
+description = "Policy engine, path jail, secret masking, and audit log chain for mcp-moat"
+readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-publish.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true

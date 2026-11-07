@@ -1,11 +1,11 @@
 [package]
 name = "mcp-moat-proxy"
-description = "Tokio NDJSON stream engine, keepalive ping-bypass, and autonomous stderr draining for mcp-moat"
+description = "Stdio JSON-RPC proxy and stream engine for mcp-moat"
+readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-publish.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true

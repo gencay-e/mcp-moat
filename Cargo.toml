@@ -32,7 +32,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1.0"
 anyhow = "1.0"
-similar = "2.6"
+similar = "3.2"
 crossterm = "0.28"
 aho-corasick = "1.1"
 regex = "1.10"

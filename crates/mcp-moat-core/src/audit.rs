@@ -295,8 +295,8 @@ pub fn verify_audit_log(
                         is_valid: false,
                         tampered_sequence: Some(event.sequence),
                         error_message: Some(format!(
-                            "Invalid starting sequence for session '{}': expected sequence 1, found {}",
-                            event.session_id, event.sequence
+                            "Invalid starting sequence: expected sequence 1, found {}",
+                            event.sequence
                         )),
                     });
                 }
@@ -306,10 +306,9 @@ pub fn verify_audit_log(
                         total_records: count,
                         is_valid: false,
                         tampered_sequence: Some(event.sequence),
-                        error_message: Some(format!(
-                            "Broken genesis hash for session '{}' at sequence 1: genesis hash mismatch",
-                            event.session_id
-                        )),
+                        error_message: Some(
+                            "Broken genesis hash at sequence 1: genesis hash mismatch".to_string(),
+                        ),
                     });
                 }
 
@@ -337,8 +336,8 @@ pub fn verify_audit_log(
                         is_valid: false,
                         tampered_sequence: Some(event.sequence),
                         error_message: Some(format!(
-                            "Broken sequence continuity for session '{}': expected sequence {}, found {}",
-                            event.session_id, *last_seq + 1, event.sequence
+                            "Broken sequence continuity: expected sequence {}, found {}",
+                            *last_seq + 1, event.sequence
                         )),
                     });
                 }

@@ -24,6 +24,7 @@ mcp-moat-core = { path = "../mcp-moat-core", version = "0.1.0" }
 mcp-moat-proxy = { path = "../mcp-moat-proxy", version = "0.1.0" }
 mcp-moat-tty = { path = "../mcp-moat-tty", version = "0.1.0" }
 clap.workspace = true
+clap_complete.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true

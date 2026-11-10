@@ -10,10 +10,9 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 const MAX_HTTP_PAYLOAD: usize = 16 * 1024 * 1024; // 16 MB maximum payload ceiling
-static SESSION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub struct ParsedUrl {
@@ -306,13 +305,7 @@ impl SseProxyServer {
         let parsed_target = ParsedUrl::parse(target_url)?;
         let audit_path = policy.config().audit_log.clone();
         let audit_level = policy.config().audit_level;
-        let session_id = format!(
-            "sse-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        );
+        let session_id = crate::new_session_id("sse");
 
         let console = match DirectConsole::open() {
             Ok(c) => Some(c),
@@ -547,14 +540,7 @@ impl SseProxyServer {
                                 break;
                             }
                         };
-                        let counter =
-                            SESSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let nanos = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_nanos();
-                        let proxy_session_id =
-                            format!("moat-{}-{:x}-{:x}", peer_addr.port(), nanos, counter);
+                        let proxy_session_id = crate::new_session_id("moat");
                         sessions
                             .lock()
                             .await
@@ -593,7 +579,7 @@ impl SseProxyServer {
                                 Some(sanitized.clone()),
                                 Some(redactions),
                             );
-                            let _ = append_audit_file(path, &event).await;
+                            append_audit_file(path, &event).await?;
                         }
                     }
 
@@ -765,7 +751,10 @@ impl SseProxyServer {
                         Some(sanitized_payload.clone()),
                         None,
                     );
-                    let _ = append_audit_file(log_p, &event).await;
+                    if let Err(error) = append_audit_file(log_p, &event).await {
+                        error!("[moat] SSE bridge audit write failed; stopping event forwarding: {error}");
+                        return Err(error);
+                    }
                 }
             }
 
@@ -825,7 +814,9 @@ impl SseProxyServer {
                                 Some(sanitized_payload.clone()),
                                 None,
                             );
-                            let _ = append_audit_file(log_p, &event).await;
+                            if let Err(e) = append_audit_file(log_p, &event).await {
+                                warn!("[moat] SSE stream audit write failed: {e}");
+                            }
                         }
                         if is_notification {
                             let resp = "HTTP/1.1 204 No Content\r\n\r\n";
@@ -869,7 +860,7 @@ impl SseProxyServer {
                             Some(sanitized_payload.clone()),
                             None,
                         );
-                        let _ = append_audit_file(log_p, &event).await;
+                        append_audit_file(log_p, &event).await?;
                     }
                 }
                 Decision::Allow => {}
@@ -951,7 +942,7 @@ impl SseProxyServer {
                         Some(String::from_utf8_lossy(&final_resp_bytes).to_string()),
                         Some(redactions),
                     );
-                    let _ = append_audit_file(log_p, &event).await;
+                    append_audit_file(log_p, &event).await?;
                 }
             }
 
@@ -1001,13 +992,7 @@ impl SseBridgeServer {
         let parsed_target = ParsedUrl::parse(target_url)?;
         let audit_path = policy.config().audit_log.clone();
         let audit_level = policy.config().audit_level;
-        let session_id = format!(
-            "bridge-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        );
+        let session_id = crate::new_session_id("bridge");
 
         let console = match DirectConsole::open() {
             Ok(c) => Some(c),
@@ -1111,7 +1096,9 @@ impl SseBridgeServer {
                                 Some(sanitized.clone()),
                                 Some(redactions),
                             );
-                            let _ = append_audit_file(log_p, &event).await;
+                            if let Err(e) = append_audit_file(log_p, &event).await {
+                                warn!("[moat] SSE stream audit write failed: {e}");
+                            }
                         }
                     }
                     let (optimized, _) = TokenOptimizer::optimize_line(&sanitized, &policy_bg);
@@ -1277,7 +1264,9 @@ impl SseBridgeServer {
                                 Some(sanitized_payload.clone()),
                                 None,
                             );
-                            let _ = append_audit_file(log_p, &event).await;
+                            if let Err(e) = append_audit_file(log_p, &event).await {
+                                warn!("[moat] SSE stream audit write failed: {e}");
+                            }
                         }
                     }
 
@@ -1330,7 +1319,9 @@ impl SseBridgeServer {
                                         Some(sanitized_payload.clone()),
                                         None,
                                     );
-                                    let _ = append_audit_file(log_p, &event).await;
+                                    if let Err(e) = append_audit_file(log_p, &event).await {
+                                warn!("[moat] SSE stream audit write failed: {e}");
+                            }
                                 }
                                 if !is_notification {
                                     let out_line = if req_method == "tools/call" {
@@ -1366,7 +1357,9 @@ impl SseBridgeServer {
                                     Some(sanitized_payload.clone()),
                                     None,
                                 );
-                                let _ = append_audit_file(log_p, &event).await;
+                                if let Err(e) = append_audit_file(log_p, &event).await {
+                                warn!("[moat] SSE stream audit write failed: {e}");
+                            }
                             }
                         }
                         Decision::Allow => {}
@@ -1424,7 +1417,9 @@ impl SseBridgeServer {
                                     Some(String::from_utf8_lossy(&final_resp).to_string()),
                                     Some(redactions),
                                 );
-                                let _ = append_audit_file(log_p, &event).await;
+                                if let Err(e) = append_audit_file(log_p, &event).await {
+                                warn!("[moat] SSE stream audit write failed: {e}");
+                            }
                             }
                         }
 
@@ -1453,7 +1448,7 @@ impl SseBridgeServer {
 
 async fn append_audit_file(path: &PathBuf, event: &AuditEvent) -> Result<()> {
     if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
+        tokio::fs::create_dir_all(parent).await?;
     }
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
@@ -1465,4 +1460,32 @@ async fn append_audit_file(path: &PathBuf, event: &AuditEvent) -> Result<()> {
     file.write_all(entry.as_bytes()).await?;
     file.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn audit_write_error_is_reported() {
+        let root = std::env::temp_dir().join(crate::new_session_id("audit-test"));
+        let blocked_path = root.join("audit.jsonl");
+        tokio::fs::create_dir_all(&blocked_path).await.unwrap();
+
+        let mut chain = AuditChain::new("audit-io-test");
+        let event = chain.create_event(
+            create_timestamp(),
+            AuditDirection::Inbound,
+            "tools/call".to_string(),
+            None,
+            None,
+            Some(AuditDecision::Allow),
+            None,
+            None,
+            None,
+        );
+
+        assert!(append_audit_file(&blocked_path, &event).await.is_err());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
 }

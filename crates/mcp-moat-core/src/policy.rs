@@ -79,6 +79,11 @@ pub struct PolicyConfig {
     #[serde(default)]
     pub hidden_tools: Vec<String>,
 
+    /// Additional files that must never be modified without operator approval.
+    /// The CLI adds the active `--config` file here automatically.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_files: Vec<PathBuf>,
+
     /// Named presets for specific MCP server types (filesystem, git, fetch, sqlite, memory)
     #[serde(default)]
     pub presets: HashMap<String, PresetConfig>,
@@ -194,6 +199,7 @@ impl Default for PolicyConfig {
             compact_schemas: false,
             max_output_bytes: None,
             hidden_tools: Vec::new(),
+            protected_files: Vec::new(),
             presets: HashMap::new(),
         }
     }
@@ -603,9 +609,9 @@ impl PolicyEngine {
         // 3. Shell and command execution checks
         if let Some(cmd_str) = self.extract_command_argument(call) {
             for blocked in &self.config.blocked_commands {
-                if cmd_str.to_lowercase().contains(&blocked.to_lowercase()) {
+                if command_matches_blocked(&cmd_str, blocked) {
                     return Decision::Block(format!(
-                        "Prohibited destructive command detected: contains '{}'",
+                        "Prohibited destructive command detected: matches '{}'",
                         blocked
                     ));
                 }
@@ -857,6 +863,14 @@ impl PolicyEngine {
         if is_protected_system_file(path) {
             return true;
         }
+        if self
+            .config
+            .protected_files
+            .iter()
+            .any(|protected| same_file_or_path(path, protected))
+        {
+            return true;
+        }
         // Protect the jail/allowed root directory itself from direct modification or deletion
         if let Ok(c) = path.canonicalize() {
             if self.canonical_allowed_roots.iter().any(|root| root == &c) {
@@ -888,7 +902,7 @@ impl PolicyEngine {
             .any(|root| target.starts_with(root))
     }
 
-    fn allowed_roots_summary(&self) -> String {
+    pub fn allowed_roots_summary(&self) -> String {
         self.canonical_allowed_roots
             .iter()
             .map(|p| p.display().to_string())
@@ -897,7 +911,30 @@ impl PolicyEngine {
     }
 }
 
-/// Lexical fast-fail syntax check before touching filesystem
+/// Compares two paths after resolving them as far as possible. Existing files are
+/// compared by canonical path; non-existent targets are compared by canonical
+/// parent plus file name. This keeps a relative `--config` path protected even
+/// when the write would create the file.
+fn same_file_or_path(a: &Path, b: &Path) -> bool {
+    match (absolute_normalized_path(a), absolute_normalized_path(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn absolute_normalized_path(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = path.canonicalize() {
+        return Some(canonical);
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let parent = absolute.parent()?.canonicalize().ok()?;
+    Some(parent.join(absolute.file_name()?))
+}
+
 /// True if a path segment looks like a DOS 8.3 short name: up to six characters, a tilde, digits,
 /// and an optional extension of up to three characters (`PROGRA~1`, `RUNNER~1`, `MOAT~1.TOM`).
 fn has_dos_short_name_segment(path: &str) -> bool {
@@ -921,21 +958,25 @@ fn has_dos_short_name_segment(path: &str) -> bool {
 pub fn validate_lexical_syntax(path_str: &str) -> Result<()> {
     let trimmed = path_str.trim();
 
-    // 1. Prevent Windows UNC and device paths with ANY separator combination (\\, //, /\, \/)
-    // and NT Object Manager namespace paths (\??\, /??/, \device\, /device/)
-    let trimmed_lower = trimmed.to_lowercase();
-    if trimmed.starts_with(r"\\")
-        || trimmed.starts_with("//")
-        || trimmed.starts_with(r"/\")
-        || trimmed.starts_with(r"\/")
-        || trimmed.starts_with(r"\??\")
-        || trimmed.starts_with("/??/")
-        || trimmed.starts_with(r"/??\")
-        || trimmed.starts_with(r"\??/")
-        || trimmed_lower.starts_with(r"\device\")
-        || trimmed_lower.starts_with("/device/")
-        || trimmed_lower.starts_with(r"/device\")
-        || trimmed_lower.starts_with(r"\device/")
+    // 1. Prevent Windows UNC paths and NT Object Manager namespaces. Normalize
+    //    separators first so mixed forms such as `\/?\C:\` are caught too.
+    //    `//` covers `\\`, `\\?\`, `\\.\` and `//server/share`.
+    let normalized_prefix = trimmed.replace('\\', "/").to_lowercase();
+    let forbidden_prefixes = [
+        "//",
+        "/??/",
+        "/device/",
+        "/global??/",
+        "/globalroot/",
+        "/dosdevices/",
+        "/systemroot/",
+        "/basenamedobjects/",
+        "/arcname/",
+        "/kernelobjects/",
+    ];
+    if forbidden_prefixes
+        .iter()
+        .any(|prefix| normalized_prefix.starts_with(prefix))
     {
         return Err(MoatError::PolicyViolation(
             "UNC network and device namespace paths are strictly prohibited".to_string(),
@@ -1001,34 +1042,30 @@ pub fn validate_lexical_syntax(path_str: &str) -> Result<()> {
         ));
     }
 
-    // 6. Prevent Windows reserved device names across ALL path components
+    // 6. Prevent Windows reserved device names across ALL path components. Split
+    //    on both separators so Windows-style paths are checked on every platform.
     let reserved_devices = [
         "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$", "CONFIG$", "COM1", "COM2",
         "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4",
         "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
 
-    for component in Path::new(trimmed).components() {
-        if let Component::ParentDir = component {
-            return Err(MoatError::PolicyViolation(
-                "Directory traversal sequence '..' is prohibited".to_string(),
-            ));
+    for segment in trimmed.split(['/', '\\']) {
+        let seg_str = segment.trim();
+        if seg_str.is_empty() {
+            continue;
         }
-        if let Component::Normal(seg) = component {
-            let seg_str = seg.to_string_lossy();
-            let base_name = seg_str
-                .trim()
-                .split('.')
-                .next()
-                .unwrap_or(&seg_str)
-                .trim()
-                .to_uppercase();
-            if reserved_devices.contains(&base_name.as_str()) {
-                return Err(MoatError::PolicyViolation(format!(
-                    "Reserved device name '{}' is prohibited",
-                    seg_str
-                )));
-            }
+        let base_name = seg_str
+            .split('.')
+            .next()
+            .unwrap_or(seg_str)
+            .trim()
+            .to_uppercase();
+        if reserved_devices.contains(&base_name.as_str()) {
+            return Err(MoatError::PolicyViolation(format!(
+                "Reserved device name '{}' is prohibited",
+                seg_str
+            )));
         }
     }
 
@@ -1740,6 +1777,274 @@ pub fn has_dangerous_shell_metacharacters(cmd: &str) -> bool {
     cmd.contains(DANGEROUS)
 }
 
+const SHELL_SEPARATORS: &[char] = &[
+    '|', '&', ';', '(', ')', '`', '$', '>', '<', '\n', '\r', '\0',
+];
+
+/// Tools that use single-letter POSIX flags. Combined short flags such as
+/// `-rf` are expanded for these programs only, because other programs (for
+/// example PowerShell) use single-dash long options such as `-NoProfile`.
+const POSIX_SHORT_FLAG_TOOLS: &[&str] = &[
+    "awk", "cat", "chgrp", "chmod", "chown", "chroot", "cp", "cut", "df", "du", "find", "grep",
+    "head", "kill", "ln", "ls", "mkdir", "mount", "mv", "ps", "rm", "rmdir", "sed", "sort", "tail",
+    "tar", "touch", "tr", "umount", "uniq", "wc", "xargs",
+];
+
+/// Tokenizes a shell command line into words, honoring single/double quotes.
+/// Backslashes are only treated as escapes for whitespace and quote characters
+/// so that Windows paths such as `C:\Windows\System32` remain intact.
+fn tokenize_shell_command(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && quote != Some('\'') {
+            match chars.peek().copied() {
+                Some(next) if next.is_whitespace() || next == '"' || next == '\'' => {
+                    current.push(next);
+                    chars.next();
+                }
+                _ => current.push('\\'),
+            }
+            continue;
+        }
+
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => current.push(ch),
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(ch),
+        }
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+/// Splits tokens into shell command segments at operators such as `;`, `&&`,
+/// and `|`. This keeps a destructive program from being matched against an
+/// argument of a later command (e.g. `rm -rf /tmp && echo /`).
+fn split_into_command_segments(tokens: &[String]) -> Vec<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut current = Vec::new();
+
+    for token in tokens {
+        let mut remainder = token.as_str();
+        loop {
+            match remainder.find(|c| SHELL_SEPARATORS.contains(&c)) {
+                Some(idx) => {
+                    if idx > 0 {
+                        current.push(remainder[..idx].to_string());
+                    }
+                    if !current.is_empty() {
+                        segments.push(std::mem::take(&mut current));
+                    }
+                    remainder = &remainder[idx + 1..];
+                }
+                None => {
+                    if !remainder.is_empty() {
+                        current.push(remainder.to_string());
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        segments.push(current);
+    }
+
+    segments
+}
+
+/// Resolves a program token to its basename: `/bin/rm` -> `rm`,
+/// `C:\Windows\System32\format.com` -> `format`, `mkfs.ext4` stays intact.
+fn normalize_program_token(token: &str) -> String {
+    let base = token
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(token)
+        .to_ascii_lowercase();
+
+    for ext in [".exe", ".com", ".bat", ".cmd", ".ps1"] {
+        if let Some(stripped) = base.strip_suffix(ext) {
+            return stripped.to_string();
+        }
+    }
+
+    base
+}
+
+/// Normalizes a non-program token for comparison. Root-like tokens (`/`, `//`,
+/// `/*`) all refer to the filesystem root and are treated as equivalent.
+fn normalize_arg_token(token: &str) -> String {
+    let lower = token.to_ascii_lowercase();
+    if !lower.is_empty() && lower.chars().all(|c| c == '/' || c == '\\') {
+        return "/".to_string();
+    }
+    if lower == "/*" || lower == "\\*" {
+        return "/".to_string();
+    }
+    lower
+}
+
+fn normalize_whitespace_lower(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Returns true when `token` is an option for `program`. PowerShell and pwsh
+/// accept slash-prefixed options (`/e`), while for other programs a leading
+/// slash denotes a path.
+fn is_flag_token(program: &str, token: &str) -> bool {
+    if token.starts_with('-') {
+        return true;
+    }
+    if let Some(rest) = token.strip_prefix('/') {
+        return matches!(program, "powershell" | "pwsh")
+            && !rest.is_empty()
+            && rest.chars().all(|c| c.is_ascii_alphabetic());
+    }
+    false
+}
+
+fn canonical_flag(token: &str) -> String {
+    // PowerShell also accepts `-enc:<payload>`.
+    let base = token.split(':').next().unwrap_or(token);
+    match base {
+        "--recursive" => "-r".to_string(),
+        "--force" => "-f".to_string(),
+        other => other.to_ascii_lowercase(),
+    }
+}
+
+fn expand_short_flags(program: &str, tokens: &[String]) -> Vec<String> {
+    if !POSIX_SHORT_FLAG_TOOLS.contains(&program) {
+        return tokens.to_vec();
+    }
+
+    let mut expanded = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        let is_combined_short_flag = token.len() > 2
+            && token.starts_with('-')
+            && !token.starts_with("--")
+            && token[1..].chars().all(|c| c.is_ascii_alphabetic());
+        if is_combined_short_flag {
+            for ch in token[1..].chars() {
+                expanded.push(format!("-{}", ch.to_ascii_lowercase()));
+            }
+        } else {
+            expanded.push(token.to_ascii_lowercase());
+        }
+    }
+    expanded
+}
+
+fn split_flags_and_args(program: &str, tokens: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut flags = Vec::new();
+    let mut args = Vec::new();
+    for token in tokens {
+        if is_flag_token(program, token) {
+            flags.push(canonical_flag(token));
+        } else {
+            args.push(normalize_arg_token(token));
+        }
+    }
+    (flags, args)
+}
+
+fn contains_contiguous(haystack: &[String], needle: &[String]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// Matches a command line against a configured blocked-command rule using
+/// tokenization instead of raw substring matching. This prevents whitespace
+/// and path-prefix bypasses while avoiding false blocks for non-root targets
+/// (e.g. `rm -rf /tmp/build` prompts instead of being hard-blocked).
+fn command_matches_blocked(cmd: &str, blocked: &str) -> bool {
+    let blocked = blocked.trim();
+    if blocked.is_empty() {
+        return false;
+    }
+
+    // Shell constructs (e.g. fork bombs) cannot be matched reliably token by
+    // token, so compare them after removing all whitespace.
+    if blocked.chars().any(|c| SHELL_SEPARATORS.contains(&c)) {
+        return normalize_whitespace_lower(cmd).contains(&normalize_whitespace_lower(blocked));
+    }
+
+    let cmd_tokens = tokenize_shell_command(cmd);
+    let blocked_tokens = tokenize_shell_command(blocked);
+    if blocked_tokens.is_empty() {
+        return false;
+    }
+
+    // Quoted or script payloads (e.g. `python -c "rm -rf /"`) are tokenized
+    // recursively so a destructive command hidden inside a string is still
+    // detected. Quotes are stripped before recursion, so the input shrinks and
+    // the recursion terminates.
+    if cmd_tokens.iter().any(|token| {
+        token.chars().any(char::is_whitespace) && command_matches_blocked(token, blocked)
+    }) {
+        return true;
+    }
+
+    // A single-token rule such as `mkfs` matches the program anywhere in the
+    // pipeline (including wrappers like sudo) and versioned names (mkfs.ext4).
+    if blocked_tokens.len() == 1 {
+        let target = normalize_program_token(&blocked_tokens[0]);
+        return cmd_tokens.iter().any(|token| {
+            let normalized = normalize_program_token(token);
+            normalized == target || normalized.starts_with(&format!("{target}."))
+        });
+    }
+
+    let blocked_program = normalize_program_token(&blocked_tokens[0]);
+    let blocked_rest = expand_short_flags(&blocked_program, &blocked_tokens[1..]);
+    let (blocked_flags, blocked_args) = split_flags_and_args(&blocked_program, &blocked_rest);
+
+    for segment in split_into_command_segments(&cmd_tokens) {
+        for (start, token) in segment.iter().enumerate() {
+            if normalize_program_token(token) != blocked_program {
+                continue;
+            }
+
+            let rest = expand_short_flags(&blocked_program, &segment[start + 1..]);
+            let (cmd_flags, cmd_args) = split_flags_and_args(&blocked_program, &rest);
+
+            if blocked_flags.iter().all(|flag| cmd_flags.contains(flag))
+                && contains_contiguous(&cmd_args, &blocked_args)
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 fn summarize_call(call: &ToolCallParams) -> String {
     if let Some(args) = &call.arguments {
         format!(
@@ -1767,5 +2072,98 @@ mod builtin_regex_tests {
     #[test]
     fn policy_engine_with_default_config_builds() {
         assert!(PolicyEngine::new(PolicyConfig::default()).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod command_matcher_tests {
+    use super::*;
+
+    #[test]
+    fn matches_destructive_rm_root_across_whitespace_and_path_prefixes() {
+        assert!(command_matches_blocked("rm -rf /", "rm -rf /"));
+        assert!(command_matches_blocked("rm  -rf   /", "rm -rf /"));
+        assert!(command_matches_blocked("/bin/rm -rf /", "rm -rf /"));
+        assert!(command_matches_blocked("/usr/bin/rm -rf /", "rm -rf /"));
+        assert!(command_matches_blocked("sudo rm -rf /", "rm -rf /"));
+        assert!(command_matches_blocked("rm -fr /", "rm -rf /"));
+        assert!(command_matches_blocked("rm -r -f /", "rm -rf /"));
+        assert!(command_matches_blocked(
+            "rm --recursive --force /",
+            "rm -rf /"
+        ));
+        assert!(command_matches_blocked("rm -rf /*", "rm -rf /"));
+        assert!(command_matches_blocked("rm -rf //", "rm -rf /"));
+    }
+
+    #[test]
+    fn does_not_block_non_root_rm_targets() {
+        assert!(!command_matches_blocked("rm -rf /tmp/build", "rm -rf /"));
+        assert!(!command_matches_blocked("rm -rf ./target", "rm -rf /"));
+        assert!(!command_matches_blocked(
+            "rm -rf /tmp && echo /",
+            "rm -rf /"
+        ));
+        assert!(!command_matches_blocked("echo rm -rf /tmp", "rm -rf /"));
+    }
+
+    #[test]
+    fn matches_single_token_rules_with_extensions_and_wrappers() {
+        assert!(command_matches_blocked("mkfs", "mkfs"));
+        assert!(command_matches_blocked("mkfs.ext4 /dev/sda", "mkfs"));
+        assert!(command_matches_blocked("sudo mkfs.xfs /dev/sda", "mkfs"));
+        assert!(!command_matches_blocked("mkfsnot /dev/sda", "mkfs"));
+    }
+
+    #[test]
+    fn matches_dd_and_format_variants() {
+        assert!(command_matches_blocked(
+            "dd if=/dev/zero of=/dev/sda",
+            "dd if=/dev/zero"
+        ));
+        assert!(command_matches_blocked(
+            "/bin/dd bs=1M if=/dev/zero",
+            "dd if=/dev/zero"
+        ));
+        assert!(!command_matches_blocked(
+            "dd if=/dev/urandom of=/dev/sda",
+            "dd if=/dev/zero"
+        ));
+        assert!(command_matches_blocked("format c:", "format c:"));
+        assert!(command_matches_blocked("format.com C:", "format c:"));
+        assert!(!command_matches_blocked("format d:", "format c:"));
+    }
+
+    #[test]
+    fn matches_powershell_encoded_flags_with_wrappers() {
+        assert!(command_matches_blocked(
+            "powershell -enc AAAA",
+            "powershell -enc"
+        ));
+        assert!(command_matches_blocked(
+            "powershell.exe -NoProfile -enc AAAA",
+            "powershell -enc"
+        ));
+        assert!(command_matches_blocked("pwsh /e AAAA", "pwsh /e"));
+        assert!(!command_matches_blocked(
+            "powershell -File script.ps1",
+            "powershell -enc"
+        ));
+    }
+
+    #[test]
+    fn matches_fork_bomb_across_whitespace() {
+        assert!(command_matches_blocked(":(){ :|:& };:", ":(){ :|:& };:"));
+        assert!(command_matches_blocked(":(){ :|:&};:", ":(){ :|:& };:"));
+        assert!(!command_matches_blocked("echo fork bomb", ":(){ :|:& };:"));
+    }
+
+    #[test]
+    fn windows_paths_are_not_treated_as_escape_sequences() {
+        assert!(command_matches_blocked(
+            r"C:\Windows\System32\format.com C:",
+            "format c:"
+        ));
+        assert!(command_matches_blocked(r"C:\bin\rm.exe -rf /", "rm -rf /"));
     }
 }

@@ -385,26 +385,30 @@ fn test_audit_p0_4_dlp_catches_sts_slack_and_openai_proj_and_pgp() {
     let dlp = DlpEngine::new();
 
     // AWS STS Token (ASIA...)
-    let (out_sts, count_sts) = dlp.sanitize_text("aws_session_token: ASIAIOSFODNN7EXAMPLE");
+    let sts_tok = ["ASIA", "IOSFODNN7EXAMPLE"].concat();
+    let sts_payload = format!("aws_session_token: {sts_tok}");
+    let (out_sts, count_sts) = dlp.sanitize_text(&sts_payload);
     assert!(
         count_sts >= 1,
         "Must detect and redact AWS STS temporary access key"
     );
-    assert!(!out_sts.contains("ASIAIOSFODNN7EXAMPLE"));
+    assert!(!out_sts.contains(&sts_tok));
     assert!(out_sts.contains("[MCP-MOAT-REDACTED-SECRET]"));
 
     // Slack User Token (xoxp-...)
-    let (out_slack, count_slack) =
-        dlp.sanitize_text("slack_token: xoxp-123456789012-345678901234-abcdef");
+    let slack_tok = ["xoxp", "123456789012", "345678901234", "abcdef"].join("-");
+    let slack_payload = format!("slack_token: {slack_tok}");
+    let (out_slack, count_slack) = dlp.sanitize_text(&slack_payload);
     assert!(count_slack >= 1, "Must detect and redact Slack user token");
-    assert!(!out_slack.contains("xoxp-123456789012"));
+    assert!(!out_slack.contains(&slack_tok));
     assert!(out_slack.contains("[MCP-MOAT-REDACTED-SECRET]"));
 
     // Modern OpenAI Project Key (sk-proj-...)
-    let (out_proj, count_proj) =
-        dlp.sanitize_text("OPENAI_KEY=sk-proj-1234567890abcdef1234567890abcdef1234");
+    let proj_tok = ["sk", "proj", "1234567890abcdef1234567890abcdef1234"].join("-");
+    let proj_payload = format!("OPENAI_KEY={proj_tok}");
+    let (out_proj, count_proj) = dlp.sanitize_text(&proj_payload);
     assert!(count_proj >= 1, "Must detect and redact OpenAI sk-proj key");
-    assert!(!out_proj.contains("sk-proj-1234567890abcdef"));
+    assert!(!out_proj.contains(&proj_tok));
     assert!(out_proj.contains("[MCP-MOAT-REDACTED-SECRET]"));
 
     // PGP Private Key Block

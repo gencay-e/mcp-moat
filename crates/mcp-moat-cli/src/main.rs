@@ -1,15 +1,15 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use mcp_moat_core::{
-    verify_audit_log, AuditDecision, AuditEvent, AuditLevel, CodegenFormat, PolicyConfig,
-    PolicyEngine, TokenOptimizer,
+    validate_lexical_syntax, verify_audit_log, AuditDecision, AuditEvent, AuditLevel,
+    CodegenFormat, PolicyConfig, PolicyEngine, TokenOptimizer,
 };
 use mcp_moat_proxy::ProxyServer;
 #[cfg(feature = "experimental-sse")]
 use mcp_moat_proxy::{SseBridgeServer, SseProxyServer};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
@@ -91,6 +91,20 @@ pub enum Commands {
         /// Overwrite file if it already exists
         #[arg(long = "force", short = 'f')]
         force: bool,
+    },
+
+    /// Validate a configuration file and policy engine without starting a server
+    Check {
+        /// Path to custom moat.toml configuration file (defaults to ./moat.toml)
+        #[arg(long = "config", short = 'c')]
+        config: Option<PathBuf>,
+    },
+
+    /// Generate shell completion scripts for moat
+    Completion {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
 
     #[cfg(feature = "experimental-sse")]
@@ -318,6 +332,46 @@ fn format_audit_event(event: &AuditEvent) -> String {
     )
 }
 
+struct LoadedConfig {
+    config: PolicyConfig,
+    source: Option<PathBuf>,
+}
+
+fn load_policy_config(config: Option<&Path>) -> Result<LoadedConfig> {
+    let (mut policy_config, source) = if let Some(cfg_path) = config {
+        let content = std::fs::read_to_string(cfg_path)
+            .with_context(|| format!("Failed to read config file '{}'", cfg_path.display()))?;
+        let parsed = toml::from_str::<PolicyConfig>(&content).with_context(|| {
+            format!(
+                "Failed to parse TOML in config file '{}'",
+                cfg_path.display()
+            )
+        })?;
+        (parsed, Some(cfg_path.to_path_buf()))
+    } else if Path::new("moat.toml").exists() {
+        let content = std::fs::read_to_string("moat.toml")?;
+        let parsed = toml::from_str::<PolicyConfig>(&content)?;
+        (parsed, Some(PathBuf::from("moat.toml")))
+    } else {
+        (PolicyConfig::default(), None)
+    };
+
+    if let Some(source) = &source {
+        if !policy_config
+            .protected_files
+            .iter()
+            .any(|protected| protected == source)
+        {
+            policy_config.protected_files.push(source.clone());
+        }
+    }
+
+    Ok(LoadedConfig {
+        config: policy_config,
+        source,
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Write diagnostics to stderr only to keep stdout clean for JSON-RPC
@@ -346,6 +400,58 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
+        Commands::Check { config } => {
+            let loaded = load_policy_config(config.as_deref())?;
+            let source = loaded
+                .source
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<built-in defaults>".to_string());
+
+            for root in &loaded.config.allowed_paths {
+                if !root.exists() {
+                    anyhow::bail!("Allowed path does not exist: {}", root.display());
+                }
+                if !root.is_dir() {
+                    anyhow::bail!("Allowed path is not a directory: {}", root.display());
+                }
+            }
+
+            if let Some(audit_log) = &loaded.config.audit_log {
+                if audit_log.is_dir() {
+                    anyhow::bail!(
+                        "audit_log must be a file path, not a directory: {}",
+                        audit_log.display()
+                    );
+                }
+                if let Some(parent) = audit_log.parent() {
+                    if !parent.as_os_str().is_empty() && !parent.exists() {
+                        anyhow::bail!(
+                            "audit_log parent directory does not exist: {}",
+                            parent.display()
+                        );
+                    }
+                }
+            }
+
+            for path in &loaded.config.protected_files {
+                validate_lexical_syntax(&path.to_string_lossy()).with_context(|| {
+                    format!("Invalid protected_files entry '{}'", path.display())
+                })?;
+            }
+
+            let engine = PolicyEngine::new(loaded.config)
+                .with_context(|| format!("Invalid policy configuration from {source}"))?;
+
+            println!("Config OK: {source}");
+            println!("Allowed roots: {}", engine.allowed_roots_summary());
+            Ok(())
+        }
+        Commands::Completion { shell } => {
+            let mut command = Cli::command();
+            clap_complete::generate(shell, &mut command, "moat", &mut std::io::stdout());
+            Ok(())
+        }
         Commands::Wrap {
             allow,
             read_only,
@@ -367,22 +473,7 @@ async fn main() -> Result<()> {
             }
 
             // Load config file if specified or default
-            let mut policy_config = if let Some(cfg_path) = config {
-                let content = std::fs::read_to_string(&cfg_path).with_context(|| {
-                    format!("Failed to read config file '{}'", cfg_path.display())
-                })?;
-                toml::from_str::<PolicyConfig>(&content).with_context(|| {
-                    format!(
-                        "Failed to parse TOML in config file '{}'",
-                        cfg_path.display()
-                    )
-                })?
-            } else if std::path::Path::new("moat.toml").exists() {
-                let content = std::fs::read_to_string("moat.toml")?;
-                toml::from_str::<PolicyConfig>(&content)?
-            } else {
-                PolicyConfig::default()
-            };
+            let mut policy_config = load_policy_config(config.as_deref())?.config;
 
             // Apply preset if specified before CLI overrides
             if let Some(ref p_name) = preset {
@@ -459,22 +550,7 @@ async fn main() -> Result<()> {
             hide_tool,
             config,
         } => {
-            let mut policy_config = if let Some(cfg_path) = config {
-                let content = std::fs::read_to_string(&cfg_path).with_context(|| {
-                    format!("Failed to read config file '{}'", cfg_path.display())
-                })?;
-                toml::from_str::<PolicyConfig>(&content).with_context(|| {
-                    format!(
-                        "Failed to parse TOML in config file '{}'",
-                        cfg_path.display()
-                    )
-                })?
-            } else if std::path::Path::new("moat.toml").exists() {
-                let content = std::fs::read_to_string("moat.toml")?;
-                toml::from_str::<PolicyConfig>(&content)?
-            } else {
-                PolicyConfig::default()
-            };
+            let mut policy_config = load_policy_config(config.as_deref())?.config;
 
             if let Some(ref p_name) = preset {
                 policy_config
@@ -535,22 +611,7 @@ async fn main() -> Result<()> {
             hide_tool,
             config,
         } => {
-            let mut policy_config = if let Some(cfg_path) = config {
-                let content = std::fs::read_to_string(&cfg_path).with_context(|| {
-                    format!("Failed to read config file '{}'", cfg_path.display())
-                })?;
-                toml::from_str::<PolicyConfig>(&content).with_context(|| {
-                    format!(
-                        "Failed to parse TOML in config file '{}'",
-                        cfg_path.display()
-                    )
-                })?
-            } else if std::path::Path::new("moat.toml").exists() {
-                let content = std::fs::read_to_string("moat.toml")?;
-                toml::from_str::<PolicyConfig>(&content)?
-            } else {
-                PolicyConfig::default()
-            };
+            let mut policy_config = load_policy_config(config.as_deref())?.config;
 
             if let Some(ref p_name) = preset {
                 policy_config
@@ -614,22 +675,7 @@ async fn main() -> Result<()> {
                 }
             };
 
-            let mut policy_config = if let Some(cfg_path) = config {
-                let content = std::fs::read_to_string(&cfg_path).with_context(|| {
-                    format!("Failed to read config file '{}'", cfg_path.display())
-                })?;
-                toml::from_str::<PolicyConfig>(&content).with_context(|| {
-                    format!(
-                        "Failed to parse TOML in config file '{}'",
-                        cfg_path.display()
-                    )
-                })?
-            } else if std::path::Path::new("moat.toml").exists() {
-                let content = std::fs::read_to_string("moat.toml")?;
-                toml::from_str::<PolicyConfig>(&content)?
-            } else {
-                PolicyConfig::default()
-            };
+            let mut policy_config = load_policy_config(config.as_deref())?.config;
 
             if let Some(ref p_name) = preset {
                 policy_config

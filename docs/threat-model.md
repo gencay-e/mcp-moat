@@ -14,7 +14,7 @@ A confused or manipulated agent, for example through a prompt injection in a web
 | Symlink pointing out of the folder | Symlinks are resolved and checked | no automated symlink test (see SECURITY.md) |
 | Changing the configuration (`moat.toml`) through the agent | Writes to the protected file are rejected | `crates/mcp-moat-core/tests` |
 | Secrets in server output (API keys, tokens, `key=value` lines, JSON text) | Known formats are replaced by `[MCP-MOAT-REDACTED-SECRET]` | `real_server_findings.rs`, `real_server_check.py` |
-| Destructive shell commands | Substring list, then operator prompt | partly; the filter is not a shell parser |
+| Destructive shell commands | Tokenized command filter, then operator prompt | `crates/mcp-moat-core/tests`; the filter is not a shell parser |
 | Altering the log afterwards | Hash chain over audit lines, checked by `moat audit verify` | `crates/mcp-moat-core/tests` |
 
 ## What moat does not do
@@ -22,7 +22,7 @@ A confused or manipulated agent, for example through a prompt injection in a web
 * It does not sandbox the server. A server can read a file in a way moat does not see as a path argument.
 * It does not stop time-of-check to time-of-use changes of a path.
 * It does not find secrets in unknown formats or in encoded form.
-* The command filter is a list of substrings. Variants such as `rm  -rf /` pass the list and are then decided by the operator prompt (or denied with `--no-prompt`).
+* The command filter tokenizes the command line, collapses whitespace, resolves path prefixes to the program name and compares flags, so `rm  -rf /`, `rm -r -f /`, `/bin/rm -fr /` and `sudo rm -rf /` are blocked. It is not a full shell parser: variable expansion, aliases, unquoted `eval` payloads, wrapper scripts and encoded commands other than the PowerShell pattern are not resolved. Those commands go to the operator prompt (or are denied with `--no-prompt`).
 * The audit hash is not keyed. Someone with write access can rebuild a whole log.
 * Windows and macOS behaviour is tested in CI but was not verified by hand on real systems.
 

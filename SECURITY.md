@@ -15,7 +15,8 @@ A policy proxy between an MCP client and an MCP server on stdio. It reduces the 
 These are known and are not fixed in 0.1.0.
 
 **Command filter**
-* `blocked_commands` matches substrings. It is not a shell parser. Variants such as `rm  -rf /` (two spaces), `rm -r -f /` or `/bin/rm -fr /` do not match the default entries.
+* `blocked_commands` is tokenized before matching. Whitespace is collapsed, path prefixes are resolved to the program name (`/bin/rm` becomes `rm`) and combined short flags are compared as sets. `rm  -rf /`, `rm -r -f /`, `/bin/rm -fr /` and `sudo rm -rf /` match the default entries, while `rm -rf /tmp/build` does not and goes to the operator prompt.
+* It is not a full shell parser. Variable expansion, aliases, unquoted `eval` payloads, wrapper scripts and encoded commands other than the PowerShell pattern are not resolved. Those commands go to the operator prompt.
 * Commands that do not match are not blocked. They go to the operator prompt. With `--no-prompt` they are denied. With `--monitor` they are forwarded.
 * Shell metacharacters (`|`, `&`, `;`, `$`, backticks, redirects) lead to an operator prompt, not to a block.
 * Approval is only as good as the operator reading the prompt.
@@ -24,12 +25,13 @@ These are known and are not fixed in 0.1.0.
 * Symlinks are resolved and checked. `scripts/real_server_check.py` tests symlinks to the outside on Linux; on macOS and Windows they are not tested.
 * A path can change between the check and the use by the MCP server (time-of-check to time-of-use). This cannot be prevented from a proxy.
 * Hardlink detection (link count above 1) exists on Unix only and has no automated test. On Windows there is no hardlink check.
-* Reserved Windows device names are rejected on every platform. This also blocks real Linux and macOS directories named `con`, `aux`, `nul` and similar. The list does not cover every reserved name.
+* Reserved Windows device names are rejected on every platform. The list covers `CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `CLOCK$`, `CONFIG$`, `COM1`-`COM9` and `LPT1`-`LPT9`, but not every reserved name. This also blocks real Linux and macOS directories with these names.
 * Path segments that look like DOS 8.3 short names (`PROGRA~1`, `RUNNER~1`, `MOAT~1.TOM`) are rejected on every platform. This also rejects a legitimate Windows path with a short user name, and a git revision such as `HEAD~1` if it is passed in a path argument (the git preset avoids this for its own argument names).
-* The UNC and NT namespace checks are text checks. They have not been tested against a real NTLM or SMB attack on Windows.
+* The UNC and NT namespace checks are text checks. Besides `\\`, `//`, `\??\`, `/??/`, `\device\` and `/device/`, they reject `\GLOBAL??\`, `\GLOBALROOT\`, `\DosDevices\`, `\SystemRoot\`, `\BaseNamedObjects\`, `\ArcName\` and `\KernelObjects\`. Separators are normalized first, so mixed forms such as `\/?\C:\` are caught. They have not been tested against a real NTLM or SMB attack on Windows.
 
 **Secret masking**
-* Only known formats are masked. Other secrets, Base64-encoded secrets and secrets split over several messages are not found.
+* Only known formats and long, mixed-class Base64/Base64url blobs are masked. Other secrets, short or low-complexity Base64 values, and secrets split over several messages are not found.
+* The Base64 heuristic can redact benign data that happens to look like an encoded secret.
 * Masking is meant for server output. It does not stop a server from leaking data in other ways.
 
 **Audit log**

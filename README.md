@@ -35,10 +35,10 @@ The output is shortened (timestamps and empty columns removed). The agent got `A
 ### Policy checks
 
 * **Path jail.** File paths in tool calls must stay inside the directories given with `--allow` (or `allowed_paths` in `moat.toml`). Paths with `..`, percent-encoded or double-encoded traversal, and `file://` URIs for `resources/read` and `resources/subscribe` are checked the same way.
-* **UNC and NT paths.** Paths starting with `\\`, `//`, `\??\`, `/??/`, `\device\` or `/device/` are rejected before any file system access. This is a text check. It has not been verified against a real SMB or NTLM scenario on Windows.
-* **Protected files.** Writes to files such as `.git`, `.gitmodules`, `.gitconfig`, `.env`, `moat.toml`, `.vscode`, `.github`, the audit log, SSH keys and AWS credentials always need operator approval.
+* **UNC and NT paths.** Paths starting with `\\`, `//`, `\??\`, `/??/`, `\device\` or `/device/` are rejected before any file system access, as are the `\GLOBAL??\`, `\GLOBALROOT\`, `\DosDevices\`, `\SystemRoot\`, `\BaseNamedObjects\`, `\ArcName\` and `\KernelObjects\` namespaces. Separators are normalized first, so mixed forms such as `\/?\C:\` are caught too. This is a text check. It has not been verified against a real SMB or NTLM scenario on Windows.
+* **Protected files.** Writes to files such as `.git`, `.gitmodules`, `.gitconfig`, `.env`, `moat.toml`, `.vscode`, `.github`, the audit log, SSH keys and AWS credentials always need operator approval. The file passed to `--config` is added to this list automatically, so an agent cannot rewrite the policy that guards it.
 * **Read-only mode.** `--read-only` blocks tools that look like they modify files, based on tool name prefixes and suffixes. Unknown tools that take a path are blocked.
-* **Blocked commands.** `blocked_commands` and `blocked_commands_regex` reject shell commands by substring or regex. This is not a complete filter, see [SECURITY.md](SECURITY.md).
+* **Blocked commands.** `blocked_commands` and `blocked_commands_regex` reject shell commands. Literal rules are tokenized: whitespace is collapsed, path prefixes such as `/bin/rm` are resolved to the program name, and combined short flags are compared as sets. `rm  -rf /`, `rm -r -f /`, `/bin/rm -fr /` and `sudo rm -rf /` are blocked, while `rm -rf /tmp/build` goes to the operator prompt. This is not a complete shell parser, see [SECURITY.md](SECURITY.md).
 * **Shell metacharacters.** Command arguments with `|`, `&`, `;`, `$`, backticks, `<`, `>` or control characters are not blocked outright. They need operator approval. PowerShell encoded-command flags are blocked.
 * **Reserved device names.** Path segments such as `CON`, `NUL`, `AUX`, `COM1` are rejected on all platforms. On Linux and macOS this also rejects real directories with these names.
 * **Symlinks and hardlinks.** Paths are resolved and checked against the jail. Hardlink checks (link count above 1) exist on Unix only. Symlinks to the outside are tested on Linux by `scripts/real_server_check.py`, not on macOS or Windows. A change between the check and the use of a file cannot be ruled out.
@@ -46,9 +46,9 @@ The output is shortened (timestamps and empty columns removed). The agent got `A
 
 ### Secret masking
 
-Output from the server (`stdout` and `stderr`) is scanned and known secret formats are replaced with `[MCP-MOAT-REDACTED-SECRET]`. Covered formats include OpenAI and Anthropic keys, Google AI Studio keys, GitHub tokens, GitLab tokens, Slack tokens, Stripe keys, npm and PyPI tokens, Hugging Face tokens, AWS access keys, bearer tokens, and PEM private key blocks. Unicode-escaped variants (`\u0073\u006b-...`) are decoded before matching.
+Output from the server (`stdout` and `stderr`) is scanned and known secret formats are replaced with `[MCP-MOAT-REDACTED-SECRET]`. Covered formats include OpenAI keys (including `sk-proj-`, `sk-svcacct-` and `sk-admin-`), Anthropic, DeepSeek, Mistral (with `mistral` context), Perplexity, Voyage AI, Cohere, Google AI Studio keys, GitHub tokens, GitLab tokens, Slack tokens, Stripe keys, npm and PyPI tokens, Hugging Face tokens, AWS access keys and temporary session keys (`ASIA...`), bearer tokens, PEM private key blocks, and long Base64/Base64url blobs with mixed character classes. Unicode-escaped variants (`\u0073\u006b-...`) are decoded before matching.
 
-Not covered: secrets in other formats, Base64 or otherwise encoded secrets, secrets split across several messages.
+Not covered: secrets in other formats, Base64 values below the length/complexity heuristic, and secrets split across several messages.
 
 ### Operator prompts
 
@@ -172,7 +172,7 @@ read_only = false
 # Protected files always require approval.
 require_approval_on_write = false
 
-# Shell command patterns that are blocked (substring match).
+# Shell command patterns that are blocked (tokenized match).
 blocked_commands = [
     "rm -rf /",
     ":(){ :|:& };:",
@@ -201,6 +201,35 @@ always_allow_tools = [
 compact_schemas = false
 # max_output_bytes = 16384
 hidden_tools = []
+
+# Extra files that always require approval. The active --config file is added automatically.
+# protected_files = ["important.txt"]
+```
+
+### Validate a configuration (`moat check`)
+
+`moat check` parses the TOML, verifies that every `allowed_paths` entry exists and is a directory, checks the audit-log path, and compiles the blocked-command regexes. It does not start a server.
+
+```bash
+moat check
+moat check --config ./configs/strict.toml
+```
+
+The command prints `Config OK: <source>` and the resolved allowed roots. It exits non-zero with a specific error when a path or regex is invalid.
+
+### Shell completions (`moat completion`)
+
+```bash
+moat completion bash
+moat completion zsh
+moat completion fish
+moat completion powershell
+```
+
+Pipe the output to your shell's completion directory, for example:
+
+```bash
+moat completion bash > ~/.local/share/bash-completion/completions/moat
 ```
 
 ### Claude Desktop

@@ -650,7 +650,7 @@ async fn test_stream_audit_logging_and_tamper_evidence() {
     let _ping_resp = framed_out.next().await.unwrap().unwrap();
 
     // 3. Call echo with secret to verify DLP sanitization in audit preview
-    let secret_payload = "ghp_123456789012345678901234567890123456";
+    let secret_payload = ["ghp", "123456789012345678901234567890123456"].join("_");
     let echo_req = json!({
         "jsonrpc": "2.0",
         "id": 3,
@@ -683,7 +683,7 @@ async fn test_stream_audit_logging_and_tamper_evidence() {
 
     // DLP assertion: raw secret token must NOT be present in audit log!
     assert!(
-        !content.contains(secret_payload),
+        !content.contains(&secret_payload),
         "Forensic audit log must redact raw secrets via AST-DLP!"
     );
 

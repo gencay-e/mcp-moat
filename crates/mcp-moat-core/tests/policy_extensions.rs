@@ -67,6 +67,24 @@ fn test_policy_config_toml_serialization() {
     assert_eq!(config.blocked_commands_regex.len(), 2);
 }
 
+#[test]
+fn test_policy_config_protected_files_roundtrip() {
+    let toml_str = r#"
+        allowed_paths = ["."]
+        protected_files = ["custom-policy.toml", "extra/policy.toml"]
+    "#;
+
+    let config: PolicyConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.protected_files.len(), 2);
+    assert!(config
+        .protected_files
+        .iter()
+        .any(|path| path.ends_with("custom-policy.toml")));
+
+    let serialized = toml::to_string(&config).unwrap();
+    assert!(serialized.contains("protected_files"));
+}
+
 // -------------------------------------------------------------
 // 2. Custom Modifying Tools
 // -------------------------------------------------------------

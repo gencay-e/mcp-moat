@@ -1013,3 +1013,212 @@ fn test_sse_commands_are_not_available_by_default() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_cli_check_valid_config() {
+    let moat = get_moat_bin();
+    let tmp_dir = std::env::temp_dir();
+    let config_path = tmp_dir.join(format!("moat_check_valid_{}.toml", std::process::id()));
+    let content = format!(
+        "allowed_paths = ['{}']\nread_only = true\nprotected_files = ['{}']\n",
+        tmp_dir.display(),
+        config_path.display()
+    );
+    std::fs::write(&config_path, content).unwrap();
+
+    let output = Command::new(moat)
+        .args(["check", "--config", config_path.to_str().unwrap()])
+        .output()
+        .await
+        .expect("Failed to execute moat check");
+
+    let _ = std::fs::remove_file(&config_path);
+    assert!(
+        output.status.success(),
+        "moat check must succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Config OK"));
+    assert!(stdout.contains("Allowed roots"));
+}
+
+#[tokio::test]
+async fn test_cli_check_invalid_toml() {
+    let moat = get_moat_bin();
+    let config_path = std::env::temp_dir().join(format!(
+        "moat_check_invalid_toml_{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(&config_path, "allowed_paths = [not valid toml\n").unwrap();
+
+    let output = Command::new(moat)
+        .args(["check", "--config", config_path.to_str().unwrap()])
+        .output()
+        .await
+        .expect("Failed to execute moat check");
+
+    let _ = std::fs::remove_file(&config_path);
+    assert!(!output.status.success(), "moat check must reject invalid TOML");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Failed to parse TOML") || stderr.contains("Invalid policy configuration"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn test_cli_check_invalid_regex() {
+    let moat = get_moat_bin();
+    let config_path = std::env::temp_dir().join(format!(
+        "moat_check_invalid_regex_{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(
+        &config_path,
+        "allowed_paths = ['.']\nblocked_commands_regex = ['(unclosed']\n",
+    )
+    .unwrap();
+
+    let output = Command::new(moat)
+        .args(["check", "--config", config_path.to_str().unwrap()])
+        .output()
+        .await
+        .expect("Failed to execute moat check");
+
+    let _ = std::fs::remove_file(&config_path);
+    assert!(!output.status.success(), "moat check must reject invalid regex");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Invalid policy configuration"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn test_cli_check_missing_allowed_path() {
+    let moat = get_moat_bin();
+    let config_path = std::env::temp_dir().join(format!(
+        "moat_check_missing_root_{}.toml",
+        std::process::id()
+    ));
+    let missing = std::env::temp_dir().join("moat_definitely_missing_root_12345");
+    let content = format!("allowed_paths = ['{}']\n", missing.display());
+    std::fs::write(&config_path, content).unwrap();
+
+    let output = Command::new(moat)
+        .args(["check", "--config", config_path.to_str().unwrap()])
+        .output()
+        .await
+        .expect("Failed to execute moat check");
+
+    let _ = std::fs::remove_file(&config_path);
+    assert!(!output.status.success(), "moat check must reject a missing allowed path");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Allowed path does not exist"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn test_cli_completion_scripts() {
+    let moat = get_moat_bin();
+    for shell in ["bash", "zsh", "fish", "powershell"] {
+        let output = Command::new(moat)
+            .args(["completion", shell])
+            .output()
+            .await
+            .expect("Failed to execute moat completion");
+
+        assert!(
+            output.status.success(),
+            "moat completion {shell} must succeed"
+        );
+        assert!(
+            !output.stdout.is_empty(),
+            "moat completion {shell} must emit a script"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_cli_wrap_protects_custom_config_path() {
+    let moat = get_moat_bin();
+    let mock_server = get_mock_server_bin();
+    let tmp_dir = std::env::temp_dir();
+    let config_path = tmp_dir.join(format!(
+        "moat_wrap_protected_{}.toml",
+        std::process::id()
+    ));
+    let content = format!(
+        "allowed_paths = ['{}']\nrequire_approval_on_write = false\n",
+        tmp_dir.display()
+    );
+    std::fs::write(&config_path, content).unwrap();
+
+    let mut child = Command::new(moat)
+        .args([
+            "wrap",
+            "--no-prompt",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--",
+            mock_server.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn moat wrap with custom config");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout).lines();
+
+    let write_call = json!({
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "tools/call",
+        "params": {
+            "name": "write_file",
+            "arguments": {
+                "path": config_path.to_str().unwrap(),
+                "content": "allowed_paths = ['.']\n"
+            }
+        }
+    });
+    stdin
+        .write_all(format!("{}\n", write_call).as_bytes())
+        .await
+        .unwrap();
+    stdin.flush().await.unwrap();
+
+    let resp_line = tokio::time::timeout(Duration::from_secs(10), reader.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let resp: Value = serde_json::from_str(&resp_line).unwrap();
+    let _ = std::fs::remove_file(&config_path);
+    drop(stdin);
+    let _ = child.wait().await;
+
+    assert_eq!(resp["id"].as_i64(), Some(11));
+    assert_eq!(
+        resp["result"]["isError"].as_bool(),
+        Some(true),
+        "Writing the active --config file must be denied"
+    );
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let lower = text.to_lowercase();
+    assert!(
+        lower.contains("approval")
+            || lower.contains("protected")
+            || lower.contains("denied")
+            || lower.contains("rejected")
+            || lower.contains("immutable_policy_violation"),
+        "unexpected denial message: {text}"
+    );
+}

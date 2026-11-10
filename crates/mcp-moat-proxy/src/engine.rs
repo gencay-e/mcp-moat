@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -16,18 +17,6 @@ use mcp_moat_core::{
 use mcp_moat_tty::{ApprovalDecision, DirectConsole, SessionApprovalCache};
 
 const MAX_FRAME_LIMIT: usize = 16 * 1024 * 1024; // 16 MB Frame-Limit
-
-struct AuditRecordInput {
-    timestamp: String,
-    direction: AuditDirection,
-    method: String,
-    tool_name: Option<String>,
-    target_path: Option<String>,
-    decision: Option<AuditDecision>,
-    operator_decision: Option<String>,
-    raw_payload: Option<String>,
-    dlp_redactions: Option<usize>,
-}
 
 /// Returns the three piped child handles, or an error naming the missing one.
 fn require_child_pipes<I, O, E>(
@@ -49,6 +38,7 @@ fn get_exit_code(status: std::process::ExitStatus) -> i32 {
             .code()
             .unwrap_or_else(|| status.signal().map(|s| 128 + s).unwrap_or(1))
     }
+
     #[cfg(not(unix))]
     {
         status.code().unwrap_or(1)
@@ -63,9 +53,10 @@ pub struct ProxyServer {
     dlp: Arc<DlpEngine>,
     console: Arc<Mutex<Option<DirectConsole>>>,
     session_cache: Arc<Mutex<SessionApprovalCache>>,
-    audit_chain: Arc<Mutex<AuditChain>>,
+    audit_chain: Arc<std::sync::Mutex<AuditChain>>,
     audit_path: Option<PathBuf>,
     audit_level: AuditLevel,
+    audit_write_lock: Arc<std::sync::Mutex<()>>,
     custom_in: Arc<Mutex<Option<BoxedAsyncRead>>>,
     custom_out: Arc<Mutex<Option<BoxedAsyncWrite>>>,
     custom_err: Arc<Mutex<Option<BoxedAsyncWrite>>>,
@@ -83,22 +74,17 @@ impl ProxyServer {
 
         let audit_path = policy.config().audit_log.clone();
         let audit_level = policy.config().audit_level;
-        let session_id = format!(
-            "sess-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        );
+        let session_id = crate::new_session_id("sess");
 
         Self {
             policy: Arc::new(policy),
             dlp: Arc::new(DlpEngine::new()),
             console: Arc::new(Mutex::new(console)),
             session_cache: Arc::new(Mutex::new(SessionApprovalCache::new())),
-            audit_chain: Arc::new(Mutex::new(AuditChain::new(session_id))),
+            audit_chain: Arc::new(std::sync::Mutex::new(AuditChain::new(session_id))),
             audit_path,
             audit_level,
+            audit_write_lock: Arc::new(std::sync::Mutex::new(())),
             custom_in: Arc::new(Mutex::new(None)),
             custom_out: Arc::new(Mutex::new(None)),
             custom_err: Arc::new(Mutex::new(None)),
@@ -108,22 +94,17 @@ impl ProxyServer {
     pub fn with_console(policy: PolicyEngine, console: Option<DirectConsole>) -> Self {
         let audit_path = policy.config().audit_log.clone();
         let audit_level = policy.config().audit_level;
-        let session_id = format!(
-            "sess-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        );
+        let session_id = crate::new_session_id("sess");
 
         Self {
             policy: Arc::new(policy),
             dlp: Arc::new(DlpEngine::new()),
             console: Arc::new(Mutex::new(console)),
             session_cache: Arc::new(Mutex::new(SessionApprovalCache::new())),
-            audit_chain: Arc::new(Mutex::new(AuditChain::new(session_id))),
+            audit_chain: Arc::new(std::sync::Mutex::new(AuditChain::new(session_id))),
             audit_path,
             audit_level,
+            audit_write_lock: Arc::new(std::sync::Mutex::new(())),
             custom_in: Arc::new(Mutex::new(None)),
             custom_out: Arc::new(Mutex::new(None)),
             custom_err: Arc::new(Mutex::new(None)),
@@ -248,138 +229,140 @@ impl ProxyServer {
             }
         });
 
-        // Background Forensic Audit Logger Task
-        // Sequentially processes records through a single worker task to eliminate race conditions
-        // and guarantee strictly monotonic sequence numbers and hash-chain continuity.
-        // Uses bounded channel (10,000 capacity) to eliminate unbounded memory growth and prevent OOM.
-        let (audit_tx, audit_writer_handle) = if let Some(path) = &self.audit_path {
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<AuditRecordInput>(10_000);
-            let path_clone = path.clone();
-            let chain_ref = Arc::clone(&self.audit_chain);
-            let handle = tokio::spawn(async move {
-                if let Some(parent) = path_clone.parent() {
-                    let _ = tokio::fs::create_dir_all(parent).await;
-                }
-                if let Ok(file) = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path_clone)
-                    .await
-                {
-                    let mut writer = tokio::io::BufWriter::new(file);
-                    while let Some(input) = rx.recv().await {
-                        let event = {
-                            let mut chain = chain_ref.lock().await;
-                            chain.create_event(
-                                input.timestamp,
-                                input.direction,
-                                input.method,
-                                input.tool_name,
-                                input.target_path,
-                                input.decision,
-                                input.operator_decision,
-                                input.raw_payload,
-                                input.dlp_redactions,
-                            )
-                        };
-                        if let Ok(json_line) = serde_json::to_string(&event) {
-                            let _ = writer
-                                .write_all(format!("{}\n", json_line).as_bytes())
-                                .await;
-                            let _ = writer.flush().await;
-                        }
-                    }
-                }
-            });
-            (Some(tx), Some(handle))
-        } else {
-            (None, None)
-        };
-
-        // Audit Logging helper closure
+        // Audit writes are serialized and acknowledged before the caller can forward an action.
+        let audit_failed = Arc::new(AtomicBool::new(false));
         let log_event = {
-            let audit_tx_clone = audit_tx.clone();
+            let audit_path = self.audit_path.clone();
+            let chain_ref = Arc::clone(&self.audit_chain);
+            let write_lock = Arc::clone(&self.audit_write_lock);
             let audit_level = self.audit_level;
             let dlp_ref = Arc::clone(&self.dlp);
+            let audit_failed_for_logger = Arc::clone(&audit_failed);
 
-            move |direction: AuditDirection,
-                  method: String,
-                  tool_name: Option<String>,
-                  target_path: Option<String>,
-                  decision: Option<AuditDecision>,
-                  operator_decision: Option<String>,
-                  raw_payload: Option<String>,
-                  dlp_redactions: Option<usize>| {
-                let tx = match &audit_tx_clone {
-                    Some(t) => t,
-                    None => return,
-                };
-
-                let should_log = match audit_level {
-                    AuditLevel::Full => true,
-                    AuditLevel::DecisionsOnly => decision.is_some(),
-                    AuditLevel::ViolationsOnly => {
-                        decision.as_ref().map(|d| d.is_violation()).unwrap_or(false)
-                            || operator_decision.as_deref() == Some("Deny")
-                            || dlp_redactions.unwrap_or(0) > 0
+            Arc::new(
+                move |direction: AuditDirection,
+                      method: String,
+                      tool_name: Option<String>,
+                      target_path: Option<String>,
+                      decision: Option<AuditDecision>,
+                      operator_decision: Option<String>,
+                      raw_payload: Option<String>,
+                      dlp_redactions: Option<usize>| {
+                    let audit_path = audit_path.clone();
+                    let chain_ref = Arc::clone(&chain_ref);
+                    let write_lock = Arc::clone(&write_lock);
+                    let dlp_ref = Arc::clone(&dlp_ref);
+                    let Some(path) = audit_path else {
+                        return true;
+                    };
+                    if audit_failed_for_logger.load(Ordering::Acquire) {
+                        return false;
                     }
-                };
 
-                if !should_log {
-                    return;
-                }
+                    let should_log = match audit_level {
+                        AuditLevel::Full => true,
+                        AuditLevel::DecisionsOnly => decision.is_some(),
+                        AuditLevel::ViolationsOnly => {
+                            decision.as_ref().map(|d| d.is_violation()).unwrap_or(false)
+                                || operator_decision.as_deref() == Some("Deny")
+                                || dlp_redactions.unwrap_or(0) > 0
+                        }
+                    };
 
-                let dlp_payload = raw_payload.map(|p| {
-                    let (sanitized, _) = dlp_ref.sanitize_line(&p);
-                    sanitized
-                });
+                    if !should_log {
+                        return true;
+                    }
 
-                // Sanitize decision contents (Block reason, AskOperator summary) to prevent leaking secrets in audit log
-                let sanitized_decision = decision.map(|d| match d {
-                    AuditDecision::Allow => AuditDecision::Allow,
-                    AuditDecision::Block { reason } => {
-                        let (sanitized_reason, _) = dlp_ref.sanitize_text(&reason);
-                        AuditDecision::Block {
-                            reason: sanitized_reason,
+                    let dlp_payload = raw_payload.map(|p| {
+                        let (sanitized, _) = dlp_ref.sanitize_line(&p);
+                        sanitized
+                    });
+
+                    // Sanitize decision contents (Block reason, AskOperator summary) to prevent leaking secrets in audit log
+                    let sanitized_decision = decision.map(|d| match d {
+                        AuditDecision::Allow => AuditDecision::Allow,
+                        AuditDecision::Block { reason } => {
+                            let (sanitized_reason, _) = dlp_ref.sanitize_text(&reason);
+                            AuditDecision::Block {
+                                reason: sanitized_reason,
+                            }
+                        }
+                        AuditDecision::AskOperator { summary } => {
+                            let (sanitized_summary, _) = dlp_ref.sanitize_text(&summary);
+                            AuditDecision::AskOperator {
+                                summary: sanitized_summary,
+                            }
+                        }
+                    });
+
+                    let sanitized_target_path = target_path.map(|p| {
+                        let (sanitized, _) = dlp_ref.sanitize_text(&p);
+                        sanitized
+                    });
+
+                    let now_sec = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let timestamp = format!("{}Z", now_sec);
+
+                    let _write_guard = write_lock.lock().unwrap_or_else(|e| e.into_inner());
+                    let event = {
+                        let mut chain = chain_ref.lock().unwrap_or_else(|e| e.into_inner());
+                        chain.create_event(
+                            timestamp,
+                            direction,
+                            method,
+                            tool_name,
+                            sanitized_target_path,
+                            sanitized_decision,
+                            operator_decision,
+                            dlp_payload,
+                            dlp_redactions,
+                        )
+                    };
+                    if let Some(parent) = path.parent() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            error!("Audit log directory could not be created: {}", e);
+                            audit_failed_for_logger.store(true, Ordering::Release);
+                            return false;
                         }
                     }
-                    AuditDecision::AskOperator { summary } => {
-                        let (sanitized_summary, _) = dlp_ref.sanitize_text(&summary);
-                        AuditDecision::AskOperator {
-                            summary: sanitized_summary,
+                    let json_line = match serde_json::to_string(&event) {
+                        Ok(line) => line,
+                        Err(e) => {
+                            error!("Audit event serialization failed: {}", e);
+                            audit_failed_for_logger.store(true, Ordering::Release);
+                            return false;
                         }
+                    };
+                    let mut file = match std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                    {
+                        Ok(file) => file,
+                        Err(e) => {
+                            error!("Audit log could not be opened: {}", e);
+                            audit_failed_for_logger.store(true, Ordering::Release);
+                            return false;
+                        }
+                    };
+                    if let Err(e) =
+                        std::io::Write::write_all(&mut file, format!("{}\n", json_line).as_bytes())
+                    {
+                        error!("Audit log write failed: {}", e);
+                        audit_failed_for_logger.store(true, Ordering::Release);
+                        return false;
                     }
-                });
-
-                let sanitized_target_path = target_path.map(|p| {
-                    let (sanitized, _) = dlp_ref.sanitize_text(&p);
-                    sanitized
-                });
-
-                let now_sec = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let timestamp = format!("{}Z", now_sec);
-
-                let record = AuditRecordInput {
-                    timestamp,
-                    direction,
-                    method,
-                    tool_name,
-                    target_path: sanitized_target_path,
-                    decision: sanitized_decision,
-                    operator_decision,
-                    raw_payload: dlp_payload,
-                    dlp_redactions,
-                };
-
-                // Synchronous FIFO dispatch to writer task (zero race condition)
-                // Non-blocking try_send into bounded queue to protect memory
-                if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(record) {
-                    warn!("Audit queue saturated (10,000 records buffered); dropping oldest or excess audit event to prevent OOM");
-                }
-            }
+                    if let Err(e) = std::io::Write::flush(&mut file) {
+                        error!("Audit log flush failed: {}", e);
+                        audit_failed_for_logger.store(true, Ordering::Release);
+                        return false;
+                    }
+                    true
+                },
+            )
         };
 
         // Task 1: Inbound stream (LLM Client in -> Child MCP server stdin)
@@ -391,12 +374,15 @@ impl ProxyServer {
         let normal_tx_clone = normal_tx.clone();
         let log_inbound = log_event.clone();
         let has_audit = self.audit_path.is_some();
+        let audit_failed_for_inbound = Arc::clone(&audit_failed);
 
         let inbound_handle = tokio::spawn(async move {
             let mut framed_in =
                 FramedRead::new(client_in, LinesCodec::new_with_max_length(MAX_FRAME_LIMIT));
             let mut ping_window_start = std::time::Instant::now();
             let mut ping_count_in_window = 0usize;
+            let audit_ok_flag = Arc::clone(&audit_failed_for_inbound);
+            let audit_ok = move || !audit_ok_flag.load(Ordering::Acquire);
 
             while let Some(line_res) = framed_in.next().await {
                 match line_res {
@@ -423,6 +409,9 @@ impl ProxyServer {
                                     Some(trimmed.to_string()),
                                     None,
                                 );
+                            }
+                            if !audit_ok() {
+                                continue;
                             }
 
                             let err_resp = serde_json::json!({
@@ -465,6 +454,9 @@ impl ProxyServer {
                                         Some(trimmed.to_string()),
                                         None,
                                     );
+                                }
+                                if !audit_ok() {
+                                    continue;
                                 }
 
                                 let err_resp = serde_json::json!({
@@ -526,13 +518,22 @@ impl ProxyServer {
                                     None,
                                 );
                             }
+                            if !audit_ok() {
+                                continue;
+                            }
 
                             // If ping rate is within safe keepalive threshold (<= 25 pings/sec), dispatch via priority bypass.
                             // If flooded (> 25 pings/sec), dispatch via normal queue to prevent priority starvation!
                             if ping_count_in_window <= 25 {
+                                if !audit_ok() {
+                                    continue;
+                                }
                                 let _ = priority_tx_clone.send(format!("{}\n", trimmed)).await;
                             } else {
                                 warn!("Excessive ping rate ({} pings/s); routing to normal queue to prevent priority starvation", ping_count_in_window);
+                                if !audit_ok() {
+                                    continue;
+                                }
                                 let _ = normal_tx_clone.send(format!("{}\n", trimmed)).await;
                             }
                             continue;
@@ -593,6 +594,9 @@ impl ProxyServer {
                                             None,
                                         );
                                     }
+                                    if !audit_ok() {
+                                        continue;
+                                    }
                                     let _ = normal_tx_clone.send(format!("{}\n", trimmed)).await;
                                 }
                                 Decision::Block(reason) => {
@@ -612,6 +616,9 @@ impl ProxyServer {
                                                 Some(trimmed.to_string()),
                                                 None,
                                             );
+                                        }
+                                        if !audit_ok() {
+                                            continue;
                                         }
                                         let _ =
                                             normal_tx_clone.send(format!("{}\n", trimmed)).await;
@@ -670,6 +677,9 @@ impl ProxyServer {
                                                 None,
                                             );
                                         }
+                                        if !audit_ok() {
+                                            continue;
+                                        }
                                         let _ =
                                             normal_tx_clone.send(format!("{}\n", trimmed)).await;
                                         continue;
@@ -713,6 +723,9 @@ impl ProxyServer {
                                                 None,
                                             );
                                         }
+                                        if !audit_ok() {
+                                            continue;
+                                        }
                                         let _ =
                                             normal_tx_clone.send(format!("{}\n", trimmed)).await;
                                         continue;
@@ -742,6 +755,8 @@ impl ProxyServer {
                                         target_path.as_ref().map(|p| p.display().to_string());
                                     let action_summary_clone = action_summary.clone();
                                     let log_approval = log_inbound.clone();
+                                    let audit_failed_for_approval =
+                                        Arc::clone(&audit_failed_for_inbound);
                                     let trimmed_clone = if has_audit {
                                         Some(trimmed.to_string())
                                     } else {
@@ -816,7 +831,12 @@ impl ProxyServer {
                                                         None,
                                                     );
                                                 }
-                                                let _ = normal_tx_approval.send(forward_line).await;
+                                                if !audit_failed_for_approval
+                                                    .load(Ordering::Acquire)
+                                                {
+                                                    let _ =
+                                                        normal_tx_approval.send(forward_line).await;
+                                                }
                                             }
                                             ApprovalDecision::AllowAlways => {
                                                 {
@@ -848,7 +868,12 @@ impl ProxyServer {
                                                         None,
                                                     );
                                                 }
-                                                let _ = normal_tx_approval.send(forward_line).await;
+                                                if !audit_failed_for_approval
+                                                    .load(Ordering::Acquire)
+                                                {
+                                                    let _ =
+                                                        normal_tx_approval.send(forward_line).await;
+                                                }
                                             }
                                             ApprovalDecision::Deny => {
                                                 warn!(
@@ -973,6 +998,9 @@ impl ProxyServer {
                                                 None,
                                             );
                                         }
+                                        if !audit_ok() {
+                                            continue;
+                                        }
                                         let _ =
                                             normal_tx_clone.send(format!("{}\n", trimmed)).await;
                                     } else {
@@ -1087,6 +1115,9 @@ impl ProxyServer {
                                 Some(trimmed.to_string()),
                                 None,
                             );
+                        }
+                        if !audit_ok() {
+                            continue;
                         }
                         let _ = normal_tx_clone.send(format!("{}\n", trimmed)).await;
                     }
@@ -1372,12 +1403,6 @@ impl ProxyServer {
                 143
             }
         };
-
-        // Wait for audit log background writer to flush all queued events
-        drop(audit_tx);
-        if let Some(handle) = audit_writer_handle {
-            let _ = tokio::time::timeout(Duration::from_millis(500), handle).await;
-        }
 
         Ok(exit_code)
     }

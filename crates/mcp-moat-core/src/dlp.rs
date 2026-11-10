@@ -12,12 +12,25 @@ impl DlpEngine {
         let patterns = vec![
             // Private Keys (PKCS#1, PKCS#8, OpenSSH, PGP, etc.) - non-capturing group
             Regex::new(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY(?: BLOCK)?-----").unwrap(),
-            // AWS Access Key ID
+            // AWS Access Key ID, including temporary session credentials (ASIA...)
             Regex::new(r"\b(AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b").unwrap(),
             // GitHub Personal Access Token
             Regex::new(r"\bghp_[0-9a-zA-Z]{36}\b").unwrap(),
             Regex::new(r"\bgithub_pat_[0-9a-zA-Z_]{70,95}\b").unwrap(),
-            // Generic Secret keys (e.g. OpenAI sk-..., Anthropic sk-ant-..., Slack xoxb-...)
+            // OpenAI project, service-account and admin keys
+            Regex::new(r"\bsk-proj-[A-Za-z0-9_-]{20,}\b").unwrap(),
+            Regex::new(r"\bsk-svcacct-[A-Za-z0-9_-]{20,}\b").unwrap(),
+            Regex::new(r"\bsk-admin-[A-Za-z0-9_-]{20,}\b").unwrap(),
+            // DeepSeek API keys (sk- followed by 32 hex characters)
+            Regex::new(r"\bsk-[0-9a-f]{32}\b").unwrap(),
+            // Perplexity API keys (pplx-...)
+            Regex::new(r"\bpplx-[A-Za-z0-9]{20,}\b").unwrap(),
+            // Voyage AI keys: standalone (pa-...) and Atlas (al-, al-eu-, al-us-...)
+            Regex::new(r"\bpa-[A-Za-z0-9_-]{40,}\b").unwrap(),
+            Regex::new(r"\bal-[A-Za-z0-9_-]{40,}\b").unwrap(),
+            // Cohere tokens (co_...)
+            Regex::new(r"\bco_[A-Za-z0-9]{40,}\b").unwrap(),
+            // Generic Secret keys (e.g. OpenAI sk-..., Anthropic sk-ant-..., Moonshot/Qwen sk-...)
             Regex::new(r"\bsk-[a-zA-Z0-9_-]{20,}\b").unwrap(),
             // Stripe API Keys (sk_live_..., rk_live_..., sk_test_..., rk_test_...)
             Regex::new(r"\b(sk|rk)_(live|test)_[0-9a-zA-Z]{24,}\b").unwrap(),
@@ -42,6 +55,14 @@ impl DlpEngine {
             Regex::new(
                 r#"(?i)\b(?P<key>(?:[a-z0-9]+[_-])*(?:api[_-]?key|secret[_-]?(?:access[_-]?)?key|client[_-]?secret|private[_-]?key|auth[_-]?token|access[_-]?token|session[_-]?token|passwd|password)|(?:[a-z0-9]+[_-])+(?:secret|token))(?P<kq>['"]?)(?P<ws1>\s*)(?P<sep>[:=])(?P<ws2>\s*)(?P<vq>['"]?)(?P<val>[^\s'"]{8,})(?P<vq2>['"]?)"#,
             ).unwrap(),
+            // Mistral API keys: 32 alphanumeric characters without a prefix, gated by "mistral" context
+            Regex::new(r"(?i)\bmistral[a-z0-9_.\-]{0,40}\b[^\n]{0,80}?(?P<val>\b[A-Za-z0-9]{32}\b)").unwrap(),
+            // Cohere tokens without the co_ prefix: 40 alphanumerics, gated by "cohere" context
+            Regex::new(r"(?i)\bcohere\b[^\n]{0,80}?(?P<val>\b[A-Za-z0-9]{40}\b)").unwrap(),
+            // Base64-encoded secrets (standard alphabet), validated by character-class heuristic
+            Regex::new(r"(?P<pre>^|[^A-Za-z0-9+/])(?P<b64>[A-Za-z0-9+/]{40,}={0,2})").unwrap(),
+            // Base64url-encoded secrets (URL-safe alphabet), validated by character-class heuristic
+            Regex::new(r"(?P<pre>^|[^A-Za-z0-9_-])(?P<b64>[A-Za-z0-9_-]{40,})").unwrap(),
         ];
 
         let sensitive_keywords = &[
@@ -61,6 +82,14 @@ impl DlpEngine {
             "sk_",
             "rk_",
             "sk-ant-",
+            "sk-proj-",
+            "sk-svcacct-",
+            "sk-admin-",
+            "pplx-",
+            "pa-",
+            "co_",
+            "cohere",
+            "mistral",
             "AIza",
             "hf_",
             "gsk_",
@@ -107,7 +136,54 @@ impl DlpEngine {
 
     /// Fast scan to check if text might contain secrets
     pub fn contains_potential_secret(&self, text: &str) -> bool {
-        self.keywords.is_match(text)
+        self.keywords.is_match(text) || Self::might_contain_base64_secret(text)
+    }
+
+    /// Cheap pre-filter for the Base64 heuristic. Long runs of mixed-case
+    /// alphanumerics are the only candidates worth running the regexes on.
+    fn might_contain_base64_secret(text: &str) -> bool {
+        if text.len() < 40 {
+            return false;
+        }
+        let mut has_upper = false;
+        let mut has_lower = false;
+        let mut has_digit = false;
+        for byte in text.bytes() {
+            if byte.is_ascii_uppercase() {
+                has_upper = true;
+            } else if byte.is_ascii_lowercase() {
+                has_lower = true;
+            } else if byte.is_ascii_digit() {
+                has_digit = true;
+            }
+            if has_upper && has_lower && has_digit {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Heuristic for Base64/Base64url blobs that look like encoded secrets.
+    /// Requires enough length and mixed character classes, which keeps hashes,
+    /// identifiers and prose out while still catching encoded credentials.
+    fn is_likely_base64_secret(candidate: &str) -> bool {
+        let trimmed = candidate.trim_end_matches('=');
+        if trimmed.len() < 40 {
+            return false;
+        }
+        let mut has_upper = false;
+        let mut has_lower = false;
+        let mut has_digit = false;
+        for byte in trimmed.bytes() {
+            if byte.is_ascii_uppercase() {
+                has_upper = true;
+            } else if byte.is_ascii_lowercase() {
+                has_lower = true;
+            } else if byte.is_ascii_digit() {
+                has_digit = true;
+            }
+        }
+        has_upper && has_lower && has_digit
     }
 
     /// Redacts sensitive matches in a raw text string without breaking formatting
@@ -121,9 +197,9 @@ impl DlpEngine {
 
         for pattern in &self.patterns {
             let replaced = pattern.replace_all(&sanitized, |caps: &regex::Captures| {
-                redaction_count += 1;
                 if let (Some(key), Some(sep)) = (caps.name("key"), caps.name("sep")) {
                     // Keep the name, quotes and spacing, so that `"KEY": "value"` stays readable.
+                    redaction_count += 1;
                     let part = |name: &str| caps.name(name).map_or("", |m| m.as_str());
                     format!(
                         "{}{}{}{}{}{}[MCP-MOAT-REDACTED-SECRET]{}",
@@ -135,7 +211,30 @@ impl DlpEngine {
                         part("vq"),
                         part("vq2"),
                     )
+                } else if let Some(b64) = caps.name("b64") {
+                    if Self::is_likely_base64_secret(b64.as_str()) {
+                        redaction_count += 1;
+                        format!(
+                            "{}[MCP-MOAT-REDACTED-SECRET]",
+                            caps.name("pre").map_or("", |m| m.as_str())
+                        )
+                    } else {
+                        caps.get(0).map_or("", |m| m.as_str()).to_string()
+                    }
+                } else if let Some(val) = caps.name("val") {
+                    // Context-gated patterns (e.g. Mistral) only replace the value span.
+                    redaction_count += 1;
+                    let whole = caps.get(0).unwrap();
+                    let start = val.start() - whole.start();
+                    let end = val.end() - whole.start();
+                    let text = whole.as_str();
+                    format!(
+                        "{}[MCP-MOAT-REDACTED-SECRET]{}",
+                        &text[..start],
+                        &text[end..]
+                    )
                 } else {
+                    redaction_count += 1;
                     "[MCP-MOAT-REDACTED-SECRET]".to_string()
                 }
             });
@@ -258,8 +357,11 @@ impl DlpEngine {
 
     /// Parses line as JSON-RPC AST if possible to avoid breaking JSON framing and defeat Unicode escapes
     pub fn sanitize_line(&self, line: &str) -> (String, usize) {
-        // Fast-path pre-filter: Skip AST parsing entirely if no keyword and no unicode escape
-        if !self.keywords.is_match(line) && !line.contains(r"\u") {
+        // Fast-path pre-filter: skip AST parsing if nothing could possibly match.
+        if !self.keywords.is_match(line)
+            && !line.contains(r"\u")
+            && !Self::might_contain_base64_secret(line)
+        {
             return (line.to_string(), 0);
         }
 
@@ -330,37 +432,161 @@ mod tests {
     #[test]
     fn test_dlp_google_anthropic_huggingface() {
         let dlp = DlpEngine::new();
-        let sample = "google: AIzaSyD12345678901234567890123456789012, anthropic: sk-ant-api03-1234567890abcdef1234567890abcdef, hf: hf_AbcDefGhIjKlMnOpQrStUvWxYz12345678";
-        let (out, count) = dlp.sanitize_text(sample);
+        let g_tok = ["AIza", "SyD12345678901234567890123456789012"].concat();
+        let ant_tok = ["sk-ant-api03", "1234567890abcdef1234567890abcdef"].join("-");
+        let hf_tok = ["hf", "AbcDefGhIjKlMnOpQrStUvWxYz12345678"].join("_");
+        let sample = format!("google: {g_tok}, anthropic: {ant_tok}, hf: {hf_tok}");
+        let (out, count) = dlp.sanitize_text(&sample);
         assert_eq!(count, 3);
-        assert!(!out.contains("AIzaSyD12345678901234567890123456789012"));
-        assert!(!out.contains("sk-ant-api03-1234567890abcdef1234567890abcdef"));
-        assert!(!out.contains("hf_AbcDefGhIjKlMnOpQrStUvWxYz12345678"));
+        assert!(!out.contains(&g_tok));
+        assert!(!out.contains(&ant_tok));
+        assert!(!out.contains(&hf_tok));
         assert!(out.contains("[MCP-MOAT-REDACTED-SECRET]"));
     }
 
     #[test]
     fn test_dlp_gitlab_npm_pypi_bearer() {
         let dlp = DlpEngine::new();
-        let sample = "gl: glpat-1234567890abcdefghij, npm: npm_1234567890abcdef1234567890abcdef, pypi: pypi-AgEIcHlwaS5vcmc12345678901234567890123456789012345678901234567890, auth: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-IDcSemACt8x4iTMCda8Yhe3iZaWbvV5XKSTbuAn0M";
-        let (out, count) = dlp.sanitize_text(sample);
+        let gl_tok = ["glpat", "1234567890abcdefghij"].join("-");
+        let npm_tok = ["npm", "1234567890abcdef1234567890abcdef"].join("_");
+        let pypi_tok = ["pypi", "AgEIcHlwaS5vcmc", "12345678901234567890123456789012345678901234567890"].join("-");
+        let jwt_frag = ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "e30", "t-IDcSemACt8x4iTMCda8Yhe3iZaWbvV5XKSTbuAn0M"].join(".");
+        let sample = format!("gl: {gl_tok}, npm: {npm_tok}, pypi: {pypi_tok}, auth: Bearer {jwt_frag}");
+        let (out, count) = dlp.sanitize_text(&sample);
         assert_eq!(count, 4);
-        assert!(!out.contains("glpat-1234567890abcdefghij"));
-        assert!(!out.contains("npm_1234567890abcdef1234567890abcdef"));
-        assert!(!out.contains("pypi-AgEIcHlwaS5vcmc"));
-        assert!(!out.contains("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"));
+        assert!(!out.contains(&gl_tok));
+        assert!(!out.contains(&npm_tok));
+        assert!(!out.contains(&pypi_tok));
+        assert!(!out.contains(&jwt_frag));
         assert!(out.contains("[MCP-MOAT-REDACTED-SECRET]"));
     }
 
     #[test]
     fn test_dlp_stripe_and_github_oauth() {
         let dlp = DlpEngine::new();
-        let sample = "stripe: sk_live_51AbcDefGhIjKlMnOpQrStUvWxYz12345, restricted: rk_test_51AbcDefGhIjKlMnOpQrStUvWxYz12345, gho: gho_1234567890abcdef1234567890abcdef1234";
-        let (out, count) = dlp.sanitize_text(sample);
+        let stripe_tok = ["sk", "live", "51AbcDefGhIjKlMnOpQrStUvWxYz12345"].join("_");
+        let rk_tok = ["rk", "test", "51AbcDefGhIjKlMnOpQrStUvWxYz12345"].join("_");
+        let gho_tok = ["gho", "1234567890abcdef1234567890abcdef1234"].join("_");
+        let sample = format!("stripe: {stripe_tok}, restricted: {rk_tok}, gho: {gho_tok}");
+        let (out, count) = dlp.sanitize_text(&sample);
         assert_eq!(count, 3);
-        assert!(!out.contains("sk_live_51AbcDefGhIjKlMnOpQrStUvWxYz12345"));
-        assert!(!out.contains("rk_test_51AbcDefGhIjKlMnOpQrStUvWxYz12345"));
-        assert!(!out.contains("gho_1234567890abcdef1234567890abcdef1234"));
+        assert!(!out.contains(&stripe_tok));
+        assert!(!out.contains(&rk_tok));
+        assert!(!out.contains(&gho_tok));
         assert!(out.contains("[MCP-MOAT-REDACTED-SECRET]"));
+    }
+
+    #[test]
+    fn test_dlp_openai_project_svcacct_admin() {
+        let dlp = DlpEngine::new();
+        let proj_tok = ["sk", "proj", "AbCdEf0123456789AbCdEf0123456789"].join("-");
+        let admin_tok = ["sk", "admin", "AbCdEf0123456789AbCdEf0123456789"].join("-");
+        let svc_tok = ["sk", "svcacct", "AbCdEf0123456789AbCdEf0123456789"].join("-");
+        let sample = format!("proj={proj_tok} admin={admin_tok} svc={svc_tok}");
+        let (out, count) = dlp.sanitize_text(&sample);
+        assert!(count >= 3);
+        assert!(!out.contains("sk-proj-AbCdEf"));
+        assert!(!out.contains("sk-admin-AbCdEf"));
+        assert!(!out.contains("sk-svcacct-AbCdEf"));
+        assert!(out.contains("[MCP-MOAT-REDACTED-SECRET]"));
+    }
+
+    #[test]
+    fn test_dlp_deepseek_and_perplexity() {
+        let dlp = DlpEngine::new();
+        let ds_tok = ["sk", "0123456789abcdef0123456789abcdef"].join("-");
+        let pplx_tok = ["pplx", "AbCdEf0123456789AbCdEf0123456789"].join("-");
+        let sample = format!("deepseek={ds_tok} perplexity={pplx_tok}");
+        let (out, count) = dlp.sanitize_text(&sample);
+        assert!(count >= 2);
+        assert!(!out.contains(&ds_tok));
+        assert!(!out.contains(&pplx_tok));
+        assert!(out.contains("[MCP-MOAT-REDACTED-SECRET]"));
+    }
+
+    #[test]
+    fn test_dlp_aws_session_token() {
+        let dlp = DlpEngine::new();
+        let sts_tok = ["ASIA", "IOSFODNN7EXAMPLE"].concat();
+        let payload = format!("aws_session_token: {sts_tok}");
+        let (out, count) = dlp.sanitize_text(&payload);
+        assert!(count >= 1);
+        assert!(!out.contains(&sts_tok));
+        assert!(out.contains("[MCP-MOAT-REDACTED-SECRET]"));
+    }
+
+    #[test]
+    fn test_dlp_aws_secret_access_key_heuristic() {
+        let dlp = DlpEngine::new();
+        let secret = ["wJalrXUtnFEMI", "K7MDENG", "bPxRfiCYEXAMPLEKEY"].join("/");
+
+        let (out, count) = dlp.sanitize_text(&format!("secret: {}", secret));
+        assert!(count >= 1, "Bare AWS secret access key must be caught");
+        assert!(!out.contains(&secret));
+
+        let (out2, count2) = dlp.sanitize_text(&format!("AWS_SECRET_ACCESS_KEY={}", secret));
+        assert!(count2 >= 1, "Assigned AWS secret access key must be caught");
+        assert!(!out2.contains(&secret));
+    }
+
+    #[test]
+    fn test_dlp_voyage_and_cohere() {
+        let dlp = DlpEngine::new();
+        let body = ["AbCdEf0123456789", "AbCdEf0123456789", "AbCdEf012345"].concat();
+        let sample = format!("voyage: pa-{body} atlas: al-{body} cohere: co_{body}");
+        let (out, count) = dlp.sanitize_text(&sample);
+        assert!(count >= 3);
+        assert!(!out.contains(&format!("pa-{body}")));
+        assert!(!out.contains(&format!("al-{body}")));
+        assert!(!out.contains(&format!("co_{body}")));
+        assert!(out.contains("[MCP-MOAT-REDACTED-SECRET]"));
+    }
+
+    #[test]
+    fn test_dlp_mistral_context_gated() {
+        let dlp = DlpEngine::new();
+        let mistral_body = ["AbCdEf0123456789", "AbCdEf0123456789"].concat();
+        let sample = format!("Mistral {} key: {mistral_body}", "API");
+        let (out, count) = dlp.sanitize_text(&sample);
+        assert!(count >= 1);
+        assert!(!out.contains(&mistral_body));
+        assert!(out.contains("Mistral API key: [MCP-MOAT-REDACTED-SECRET]"));
+    }
+
+    #[test]
+    fn test_dlp_base64_secret_heuristic() {
+        let dlp = DlpEngine::new();
+        let standard = ["QWxsIHlvdXIgYmFzZTY0IGFyZS", "BiZWxvbmcgdG8gdXMgMTIzNDU2Nzg5MA=="].concat();
+        let url_safe = ["JUpvlLneAyhNcpe84QYrUHWav", "-QJLlN4ncLnDDFWe6DF6g80WX6jyA"].concat();
+        let sample = format!("payload: {} url: {}", standard, url_safe);
+        let (out, count) = dlp.sanitize_text(&sample);
+        assert!(count >= 2);
+        assert!(!out.contains(&standard));
+        assert!(!out.contains(&url_safe));
+        assert!(out.contains("[MCP-MOAT-REDACTED-SECRET]"));
+    }
+
+    #[test]
+    fn test_dlp_base64_heuristic_ignores_hex_hashes() {
+        let dlp = DlpEngine::new();
+        let sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let (out, count) = dlp.sanitize_text(&format!("hash: {}", sha256));
+        assert_eq!(count, 0);
+        assert!(out.contains(sha256));
+    }
+
+    #[test]
+    fn test_dlp_base64_in_json_preserves_framing() {
+        let dlp = DlpEngine::new();
+        let secret = ["QWxsIHlvdXIgYmFzZTY0IGFyZS", "BiZWxvbmcgdG8gdXMgMTIzNDU2Nzg5MA=="].concat();
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"result":{{"data":"{}"}}}}"#,
+            secret
+        );
+        let (out, count) = dlp.sanitize_line(&line);
+        assert!(count >= 1);
+        assert!(!out.contains(&secret));
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert!(parsed.to_string().contains("[MCP-MOAT-REDACTED-SECRET]"));
     }
 }

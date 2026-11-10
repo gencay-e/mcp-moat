@@ -307,8 +307,8 @@ pub fn verify_audit_log(
                         is_valid: false,
                         tampered_sequence: Some(event.sequence),
                         error_message: Some(format!(
-                            "Broken genesis hash for session '{}' at sequence 1: expected {}, found {}",
-                            event.session_id, GENESIS_HASH, event.prev_hash
+                            "Broken genesis hash for session '{}' at sequence 1: genesis hash mismatch",
+                            event.session_id
                         )),
                     });
                 }
@@ -349,8 +349,8 @@ pub fn verify_audit_log(
                         is_valid: false,
                         tampered_sequence: Some(event.sequence),
                         error_message: Some(format!(
-                            "Broken hash chain at sequence {}: expected prev_hash {}, found {}",
-                            event.sequence, last_hash, event.prev_hash
+                            "Broken hash chain at sequence {}: previous entry hash mismatch",
+                            event.sequence
                         )),
                     });
                 }

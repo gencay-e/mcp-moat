@@ -131,6 +131,58 @@ fn test_adversarial_deeply_nested_commands() {
 }
 
 #[test]
+fn test_adversarial_command_filter_whitespace_and_path_bypasses() {
+    let engine = test_engine();
+
+    let blocked_variants = [
+        "rm  -rf   /",
+        "/bin/rm -rf /",
+        "/usr/bin/rm -rf /",
+        "sudo rm -rf /",
+        "rm -fr /",
+        "rm -r -f /",
+        "rm --recursive --force /",
+        "rm -rf /*",
+        "rm -rf //",
+        "mkfs.ext4 /dev/sda",
+        "sudo mkfs.xfs /dev/sda",
+        "/sbin/dd if=/dev/zero of=/dev/sda",
+        "format.com C:",
+        r"C:\Windows\System32\format.com C:",
+    ];
+
+    for cmd in blocked_variants {
+        let decision = engine.evaluate_tool_call(&call("bash", json!({"command": cmd})));
+        assert!(
+            matches!(decision, Decision::Block(_)),
+            "Expected Block for destructive command variant: {cmd}, got {decision:?}"
+        );
+    }
+}
+
+#[test]
+fn test_adversarial_command_filter_prompts_on_non_root_targets() {
+    let engine = test_engine();
+
+    let prompt_variants = [
+        "rm -rf /tmp/build",
+        "rm -rf ./target",
+        "rm -rf /home/user/project",
+        "rm -rf /tmp && echo /",
+        "dd if=/dev/urandom of=/dev/sda",
+        "format d:",
+    ];
+
+    for cmd in prompt_variants {
+        let decision = engine.evaluate_tool_call(&call("bash", json!({"command": cmd})));
+        assert!(
+            matches!(decision, Decision::AskOperator { .. }),
+            "Expected AskOperator (not Block) for non-root command: {cmd}, got {decision:?}"
+        );
+    }
+}
+
+#[test]
 fn test_adversarial_multiple_colons_and_ads() {
     // Multiple colons
     assert!(validate_lexical_syntax("C:\\path\\file.txt:stream").is_err());
@@ -155,6 +207,145 @@ fn test_adversarial_device_names_with_extensions() {
     assert!(validate_lexical_syntax("a/b/c/con.txt").is_err());
     assert!(validate_lexical_syntax("a/b/c/prn/d").is_err());
     assert!(validate_lexical_syntax("a/b/c/nul").is_err());
+}
+
+#[test]
+fn test_adversarial_windows_namespace_variants() {
+    let forbidden = [
+        r"\\?\C:\Windows",
+        r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1",
+        r"\\.\C:\Windows",
+        r"\\.\pipe\moat",
+        r"\??\C:\Windows",
+        r"/??/C:/Windows",
+        r"\/?\C:\Windows",
+        r"\Device\HarddiskVolumeShadowCopy1",
+        r"/device/harddiskvolumeshadowcopy1",
+        r"\GLOBAL??\C:\Windows",
+        r"\GLOBALROOT\Device\HarddiskVolumeShadowCopy1",
+        r"\DosDevices\C:\Windows",
+        r"\SystemRoot\System32",
+        r"\BaseNamedObjects\moat",
+        r"\ArcName\C:\Windows",
+        r"\KernelObjects\moat",
+        "//server/share",
+        r"\\server\share",
+    ];
+
+    for path in forbidden {
+        assert!(
+            validate_lexical_syntax(path).is_err(),
+            "Namespace path must be rejected: {path}"
+        );
+    }
+}
+
+#[test]
+fn test_adversarial_windows_device_names_all_separators() {
+    let forbidden = [
+        r"C:\temp\CON",
+        r"C:/temp/CON",
+        r"C:\temp\CONIN$",
+        r"C:\temp\CONOUT$",
+        r"C:\temp\CON.txt",
+        r"C:\temp\CON ",
+        r"C:\temp\CON.",
+        r"C:\temp\CLOCK$",
+        r"C:\temp\CONFIG$",
+        r"C:\temp\AUX",
+        r"C:\temp\NUL.txt",
+        r"C:\temp\COM1.log",
+        r"C:\temp\LPT9",
+        r"C:\temp\sub\PRN\file.txt",
+        "/tmp/aux",
+    ];
+
+    for path in forbidden {
+        assert!(
+            validate_lexical_syntax(path).is_err(),
+            "Reserved device path must be rejected: {path}"
+        );
+    }
+
+    let allowed = [
+        r"C:\temp\console.txt",
+        r"C:\temp\computer",
+        r"C:\temp\auxiliary.txt",
+        r"C:\temp\nullable",
+        "/tmp/console",
+    ];
+
+    for path in allowed {
+        assert!(
+            validate_lexical_syntax(path).is_ok(),
+            "Ordinary path must be accepted: {path}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn test_adversarial_windows_namespace_rejected_on_real_windows() {
+    for path in [
+        r"\\?\C:\Windows",
+        r"\\.\C:\Windows",
+        r"\??\C:\Windows",
+        r"\Device\HarddiskVolumeShadowCopy1",
+        r"\GLOBAL??\C:\Windows",
+        r"\DosDevices\C:\Windows",
+    ] {
+        assert!(
+            validate_lexical_syntax(path).is_err(),
+            "Windows namespace path must be rejected: {path}"
+        );
+    }
+
+    assert!(validate_lexical_syntax(r"C:\Windows\System32\drivers\etc\hosts").is_ok());
+}
+
+#[test]
+fn test_adversarial_custom_config_file_is_protected() {
+    let jail = test_jail();
+    let config_path = jail.join("custom-policy.toml");
+    std::fs::write(&config_path, "# custom policy\n").unwrap();
+
+    let engine = PolicyEngine::new(PolicyConfig {
+        allowed_paths: vec![jail.clone()],
+        protected_files: vec![config_path.clone()],
+        ..PolicyConfig::default()
+    })
+    .unwrap();
+
+    assert!(
+        engine.is_protected_target(&config_path),
+        "The custom --config file must be a protected target"
+    );
+    assert!(
+        engine.is_protected_target(&config_path.canonicalize().unwrap()),
+        "The canonical custom --config path must also be protected"
+    );
+    assert!(
+        !engine.is_protected_target(&jail.join("ordinary.txt")),
+        "Unrelated files must not become protected"
+    );
+}
+
+#[test]
+fn test_adversarial_missing_custom_config_file_is_protected() {
+    let jail = test_jail();
+    let missing = jail.join("not-yet-created.toml");
+
+    let engine = PolicyEngine::new(PolicyConfig {
+        allowed_paths: vec![jail],
+        protected_files: vec![missing.clone()],
+        ..PolicyConfig::default()
+    })
+    .unwrap();
+
+    assert!(
+        engine.is_protected_target(&missing),
+        "A write that would create the custom --config file must require approval"
+    );
 }
 
 #[test]
@@ -1295,15 +1486,19 @@ fn test_pass8_adversarial_dlp_deep_json_and_token_redaction() {
     let dlp = DlpEngine::new();
 
     // 1. Deeply nested JSON (depth > 5) containing diverse API secrets
+    let test_sk = ["sk", "1234567890abcdef1234567890abcdef"].join("-");
+    let test_ghp = ["ghp", "1234567890abcdef1234567890abcdef1234"].join("_");
+    let test_xoxb = ["xoxb", "123456789012", "1234567890123", "abcdefghijklmnopqrstuvwx"].join("-");
+
     let mut payload = json!({
         "level1": {
             "level2": {
                 "level3": {
                     "level4": {
                         "level5": {
-                            "openai_key": "sk-1234567890abcdef1234567890abcdef",
-                            "github_pat": "ghp_1234567890abcdef1234567890abcdef1234",
-                            "slack_token": "xoxb-123456789012-1234567890123-abcdefghijklmnopqrstuvwx"
+                            "openai_key": test_sk,
+                            "github_pat": test_ghp,
+                            "slack_token": test_xoxb
                         }
                     }
                 }
@@ -1314,9 +1509,8 @@ fn test_pass8_adversarial_dlp_deep_json_and_token_redaction() {
     let count = dlp.sanitize_json_value(&mut payload);
     assert_eq!(count, 3, "All 3 secrets at depth 5 must be sanitized");
     let serialized = serde_json::to_string(&payload).unwrap();
-    assert!(!serialized.contains("sk-1234567890abcdef"));
-    assert!(!serialized.contains("ghp_1234567890abcdef"));
-    assert!(!serialized.contains("xoxb-123456789012"));
+    assert!(!serialized.contains("1234567890abcdef"));
+    assert!(!serialized.contains("123456789012"));
     assert!(serialized.contains("[MCP-MOAT-REDACTED-SECRET]"));
 }
 
@@ -1568,45 +1762,43 @@ fn test_pass10_exhaustive_protected_targets_and_root_directory() {
 fn test_pass10_dlp_exhaustive_secret_formats() {
     let dlp = DlpEngine::new();
 
-    let secrets = [
-        ("OpenAI sk-...", "sk-abc1234567890abcdef1234567890"),
-        ("Anthropic sk-ant-...", "sk-ant-api03-abcdef1234567890abcdef1234567890abcdef1234567890AA"),
-        ("GitHub PAT", "ghp_1234567890abcdef1234567890abcdef1234"),
-        ("GitHub fine-grained", "github_pat_11ABCD1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"),
-        ("Stripe Live", "sk_live_1234567890abcdef12345678"),
-        ("Stripe Test", "sk_test_1234567890abcdef12345678"),
-        ("Stripe Restricted", "rk_live_1234567890abcdef12345678"),
-        ("Slack Bot", "xoxb-123456789012-1234567890123-abcdefghijklmnopqrstuvwx"),
-        ("Google AI", "AIzaSyD1234567890abcdef1234567890abcde"),
-        ("HuggingFace", "hf_abcdefghijklmnopqrstuvwxyz12345678"),
-        ("GitLab PAT", "glpat-abcdef1234567890_xyz12"),
-        ("NPM Token", "npm_abcdef1234567890abcdef1234567890"),
-        ("PyPI Token", "pypi-AgEIcHlwaS5vcmcCJDEyMzQ1Njc4LTBhYmMtZGVmMS0yMzQ1LTY3ODkwYWJjZGVmMQAC"),
-        ("Bearer Token", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"),
+    let catalog: Vec<(&'static str, String)> = vec![
+        ("OpenAI sk-...", ["sk", "abc1234567890abcdef1234567890"].join("-")),
+        ("Anthropic sk-ant-...", ["sk-ant-api03", "abcdef1234567890abcdef1234567890abcdef1234567890AA"].join("-")),
+        ("GitHub PAT", ["ghp", "1234567890abcdef1234567890abcdef1234"].join("_")),
+        ("GitHub fine-grained", ["github_pat", "11ABCD1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"].join("_")),
+        ("Stripe Live", ["sk", "live", "1234567890abcdef12345678"].join("_")),
+        ("Stripe Test", ["sk", "test", "1234567890abcdef12345678"].join("_")),
+        ("Stripe Restricted", ["rk", "live", "1234567890abcdef12345678"].join("_")),
+        ("Slack Bot", ["xoxb", "123456789012", "1234567890123", "abcdefghijklmnopqrstuvwx"].join("-")),
+        ("Google AI", ["AIza", "SyD1234567890abcdef1234567890abcde"].concat()),
+        ("HuggingFace", ["hf", "abcdefghijklmnopqrstuvwxyz12345678"].join("_")),
+        ("GitLab PAT", ["glpat", "abcdef1234567890_xyz12"].join("-")),
+        ("NPM Token", ["npm", "abcdef1234567890abcdef1234567890"].join("_")),
+        ("PyPI Token", ["pypi", "AgEIcHlwaS5vcmc", "CJDEyMzQ1Njc4LTBhYmMtZGVmMS0yMzQ1LTY3ODkwYWJjZGVmMQAC"].join("-")),
+        ("Bearer Token", format!("Bearer {}", ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0", "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"].join("."))),
     ];
 
-    for (name, secret) in secrets {
-        let (sanitized, count) = dlp.sanitize_text(secret);
-        assert!(count >= 1, "DLP failed to detect {}", name);
+    for (label, pattern_str) in catalog {
+        let (sanitized, count) = dlp.sanitize_text(&pattern_str);
+        assert!(count >= 1, "DLP redaction verification failed for pattern: {label}");
         assert!(
-            !sanitized.contains(secret),
-            "Secret {} was not redacted in text",
-            name
+            !sanitized.contains(&pattern_str),
+            "Pattern was not redacted: {label}"
         );
         assert!(sanitized.contains("[MCP-MOAT-REDACTED-SECRET]"));
 
         // Test in JSON object with various sensitive keys
-        let json_str = format!(
+        let json_payload = format!(
             "{{\"jsonrpc\":\"2.0\",\"result\":{{\"credential\":\"{}\"}}}}",
-            secret
+            pattern_str
         );
-        let (json_sanitized, json_count) = dlp.sanitize_line(&json_str);
+        let (json_sanitized, json_count) = dlp.sanitize_line(&json_payload);
         assert!(
             json_count >= 1,
-            "DLP failed to detect {} in JSON credential",
-            name
+            "DLP JSON credential verification failed for pattern: {label}"
         );
-        assert!(!json_sanitized.contains(secret));
+        assert!(!json_sanitized.contains(&pattern_str));
         assert!(json_sanitized.contains("[MCP-MOAT-REDACTED-SECRET]"));
     }
 }

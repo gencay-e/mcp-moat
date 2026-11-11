@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1 (2026-11-11)
+
+No change to how moat behaves.
+
+* The Linux binary is built on Ubuntu 22.04 and runs on systems with glibc 2.35 or newer. 0.2.0 needed glibc 2.39.
+* The images and links in the README work on crates.io. They used paths that crates.io resolved against the wrong folder.
+* CI checks the dependencies with `cargo audit`. Release notes are taken from this file.
+* Test names and comments were cleaned up, and a test that depended on the order of other tests creates its own folder.
+* The security model moved to `docs/security-model.md` and was corrected: `--config` and `protected_files` are protected, audit write errors stop the call.
+
 ## 0.2.0 (2026-11-11)
 
 ### Added

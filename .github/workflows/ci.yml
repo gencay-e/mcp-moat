@@ -1,4 +1,4 @@
-name: CI & Release Pipeline
+name: mcp-moat CI
 
 on:
   push:

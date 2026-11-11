@@ -12,8 +12,8 @@ categories.workspace = true
 autotests = false
 
 [dependencies]
-mcp-moat-core = { path = "../mcp-moat-core", version = "0.2.0" }
-mcp-moat-tty = { path = "../mcp-moat-tty", version = "0.2.0" }
+mcp-moat-core = { path = "../mcp-moat-core", version = "0.2.1" }
+mcp-moat-tty = { path = "../mcp-moat-tty", version = "0.2.1" }
 tokio.workspace = true
 tokio-util.workspace = true
 serde.workspace = true

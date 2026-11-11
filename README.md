@@ -1,20 +1,20 @@
 # mcp-moat (`moat`)
 
 [![Crates.io](https://img.shields.io/crates/v/mcp-moat.svg)](https://crates.io/crates/mcp-moat)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/gencay-e/mcp-moat/blob/main/LICENSE)
 [![CI](https://github.com/gencay-e/mcp-moat/actions/workflows/ci.yml/badge.svg)](https://github.com/gencay-e/mcp-moat/actions/workflows/ci.yml)
 
 A policy proxy for MCP servers, written in Rust. `moat` sits between an MCP client (for example Claude Desktop, Claude Code, Cursor) and an MCP server that talks JSON-RPC over stdio. It checks tool calls against a policy, masks secrets in server output, can ask the operator before sensitive actions, and can reduce the size of tool schemas and outputs.
 
-<img alt="moat sits between an MCP client such as Claude Desktop, Claude Code or Cursor and an MCP server, talks stdio to both, checks paths and commands, masks secrets, asks the operator on the terminal and writes a hash-chained audit log" src="docs/images/moat-flow.svg" width="900">
+<img alt="moat sits between an MCP client such as Claude Desktop, Claude Code or Cursor and an MCP server, talks stdio to both, checks paths and commands, masks secrets, asks the operator on the terminal and writes a hash-chained audit log" src="https://raw.githubusercontent.com/gencay-e/mcp-moat/main/docs/images/moat-flow.svg" width="900">
 
-`moat` filters stdio traffic and prompts the operator, but it does not sandbox the server process itself. Read [SECURITY.md](SECURITY.md) for what it does not protect against, and [CHANGELOG.md](CHANGELOG.md) for the current release (`0.2.0`).
+`moat` filters stdio traffic and prompts the operator, but it does not sandbox the server process itself. Read [SECURITY.md](https://github.com/gencay-e/mcp-moat/blob/main/SECURITY.md) for what it does not protect against, and [CHANGELOG.md](https://github.com/gencay-e/mcp-moat/blob/main/CHANGELOG.md) for the current release (`0.2.1`).
 
 ---
 
 ## What it does
 
-<img alt="Four example tool calls: reading a file inside the project is allowed and a secret in it is masked, reading ../.ssh is blocked, writing project/.env and a shell command with a pipe both ask the operator" src="docs/images/moat-example.svg" width="900">
+<img alt="Four example tool calls: reading a file inside the project is allowed and a secret in it is masked, reading ../.ssh is blocked, writing project/.env and a shell command with a pipe both ask the operator" src="https://raw.githubusercontent.com/gencay-e/mcp-moat/main/docs/images/moat-example.svg" width="900">
 
 A real run in front of `@modelcontextprotocol/server-filesystem`, allowed folder `/srv/demo/project`. The agent read `notes.md` (which holds a token), then tried `../private/keys.txt` twice:
 
@@ -38,7 +38,7 @@ The output is shortened (timestamps and empty columns removed). The agent got `A
 * **UNC and NT paths.** Paths starting with `\\`, `//`, `\??\`, `/??/`, `\device\` or `/device/` are rejected before any file system access, as are the `\GLOBAL??\`, `\GLOBALROOT\`, `\DosDevices\`, `\SystemRoot\`, `\BaseNamedObjects\`, `\ArcName\` and `\KernelObjects\` namespaces. Separators are normalized first, so mixed forms such as `\/?\C:\` are caught too. This is a text check. It has not been verified against a real SMB or NTLM scenario on Windows.
 * **Protected files.** Writes to files such as `.git`, `.gitmodules`, `.gitconfig`, `.env`, `moat.toml`, `.vscode`, `.github`, the audit log, SSH keys and AWS credentials always need operator approval. The file passed to `--config` is added to this list automatically, so an agent cannot rewrite the policy that guards it.
 * **Read-only mode.** `--read-only` blocks tools that look like they modify files, based on tool name prefixes and suffixes. Unknown tools that take a path are blocked.
-* **Blocked commands.** `blocked_commands` and `blocked_commands_regex` reject shell commands. Literal rules are tokenized: whitespace is collapsed, path prefixes such as `/bin/rm` are resolved to the program name, and combined short flags are compared as sets. `rm  -rf /`, `rm -r -f /`, `/bin/rm -fr /` and `sudo rm -rf /` are blocked, while `rm -rf /tmp/build` goes to the operator prompt. This is not a complete shell parser, see [SECURITY.md](SECURITY.md).
+* **Blocked commands.** `blocked_commands` and `blocked_commands_regex` reject shell commands. Literal rules are tokenized: whitespace is collapsed, path prefixes such as `/bin/rm` are resolved to the program name, and combined short flags are compared as sets. `rm  -rf /`, `rm -r -f /`, `/bin/rm -fr /` and `sudo rm -rf /` are blocked, while `rm -rf /tmp/build` goes to the operator prompt. This is not a complete shell parser, see [SECURITY.md](https://github.com/gencay-e/mcp-moat/blob/main/SECURITY.md).
 * **Shell metacharacters.** Command arguments with `|`, `&`, `;`, `$`, backticks, `<`, `>` or control characters are not blocked outright. They need operator approval. PowerShell encoded-command flags are blocked.
 * **Reserved device names.** Path segments such as `CON`, `NUL`, `AUX`, `COM1` are rejected on all platforms. On Linux and macOS this also rejects real directories with these names.
 * **Symlinks and hardlinks.** Paths are resolved and checked against the jail. Hardlink checks (link count above 1) exist on Unix only. Symlinks to the outside are tested on Linux by `scripts/real_server_check.py`, not on macOS or Windows. A change between the check and the use of a file cannot be ruled out.
@@ -346,4 +346,4 @@ Crates:
 
 ## License
 
-MIT, see [LICENSE](LICENSE). Created by [Gencay](https://github.com/gencay-e).
+MIT, see [LICENSE](https://github.com/gencay-e/mcp-moat/blob/main/LICENSE). Created by [Gencay](https://github.com/gencay-e).

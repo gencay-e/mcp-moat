@@ -6,8 +6,9 @@ Usage: cargo build --release --bin moat && python scripts/demo.py
 Record: asciinema rec --idle-time-limit 1 -c "python scripts/demo.py" demo.cast
         agg --font-size 19 --last-frame-duration 3 demo.cast moat-demo.gif
 The terminal is meant to be 80 columns wide. Commands are typed char by char
-with small random delays; output is printed as soon as moat returns it."""
-import json, os, queue, random, shutil, string, subprocess, tempfile, textwrap, threading, time
+with small random delays. Each verdict line is a short summary of moat's real
+response; the script asserts that the response contains the expected marker."""
+import json, os, queue, random, re, shutil, string, subprocess, tempfile, threading, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +23,6 @@ LOG = WORK / "audit.jsonl"
 os.chdir(WORK)
 
 GRY, GRN, RED, CY, B, R = "\x1b[90m", "\x1b[32m", "\x1b[31m", "\x1b[36m", "\x1b[1m", "\x1b[0m"
-WIDTH = 74
 rng = random.Random(3)
 
 def out(s=""): print(s, flush=True)
@@ -54,43 +54,39 @@ def text(m):
     t = " ".join(c.get("text", "") for c in r.get("content", []) if isinstance(c, dict))
     return t or m.get("error", {}).get("message", json.dumps(m))
 
-# The server was started above (as the first command would start it); the
-# initialize handshake runs while the first command is being typed.
+# The initialize handshake runs while the first command is being typed.
 send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "demo", "version": "1"}}})
 typed(f"{CY}${R} ", "moat wrap --no-prompt --allow ./project --audit-log audit.jsonl \\")
 typed("    ", "-- npx -y @modelcontextprotocol/server-filesystem ./project")
 recv(1); send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 pause(0.5)
 n = [10]
-def call(comment, shown, name, args):
-    out(f"{GRY}# {comment}{R}")
+def call(shown, name, args, label, color, marker, summary):
+    out()
     typed(f"{B}>{R} ", shown)
     n[0] += 1
     send({"jsonrpc": "2.0", "id": n[0], "method": "tools/call", "params": {"name": name, "arguments": args}})
-    m = recv(n[0]); r = m.get("result", {}); t = text(m)
-    blocked = bool(r.get("isError")) or "error" in m
-    if blocked:
-        ls = [l.strip() for l in t.splitlines() if l.strip()]
-        head = ls[0].strip("[]")
-        why = ls[1].replace("Action blocked: ", "").replace(str(WORK) + "/", "")
-        out(f"  {RED}BLOCKED{R} {head}")
-        for w in textwrap.wrap(why, WIDTH, initial_indent="  ", subsequent_indent="  "): out(f"{GRY}{w}{R}")
-    else:
-        for line in t.splitlines():
-            if "KEY" in line or "REDACTED" in line: out(f"  {GRN}OK{R}  {line}")
-    pause(rng.uniform(0.5, 0.7))
-    return t, blocked
+    m = recv(n[0]); t = text(m)
+    assert marker.lower() in t.lower(), f"expected {marker!r} in moat's response: {t!r}"
+    out(f"  {color}{label}{R}  {summary(t)}")
+    pause(rng.uniform(0.6, 0.9))
+    return t
 
-t, _ = call("1. the agent reads a file that holds a secret", 'read_file("project/notes.md")', "read_file", {"path": str(P / "notes.md")})
+t = call('read_file project/notes.md', "read_file", {"path": str(P / "notes.md")},
+         "\u2713 allowed", GRN, "REDACTED", lambda t: "key masked: " + re.search(r"OPENAI_API_KEY=\S+", t).group(0))
 assert key not in t
-call("2. it reaches outside the allowed folder", 'read_file("../.ssh/id_ed25519")', "read_file", {"path": str(WORK / ".ssh" / "id_ed25519")})
-call("3. it writes a protected file (--no-prompt: no operator, so deny)", 'write_file("project/.env", "X=1")', "write_file", {"path": str(P / ".env"), "content": "X=1"})
+call('read_file ../.ssh/id_ed25519', "read_file", {"path": str(WORK / ".ssh" / "id_ed25519")},
+     "\u2717 blocked", RED, "outside boundary", lambda t: "outside the allowed folder")
+call('write_file project/.env', "write_file", {"path": str(P / ".env"), "content": "X=1"},
+     "\u2717 denied ", RED, "--no-prompt is set", lambda t: "protected file, --no-prompt is set")
 assert not (P / ".env").exists()
 proc.stdin.close(); proc.wait(timeout=20)
-out(f"{GRY}# 4. the audit log is a hash chain{R}")
+out()
 typed(f"{CY}${R} ", "moat audit verify audit.jsonl")
 v = subprocess.run([MOAT, "audit", "verify", str(LOG)], capture_output=True, text=True)
-for line in (v.stdout + v.stderr).splitlines():
-    if line.strip(): out(f"  {line.replace(str(LOG), 'audit.jsonl')}")
+vt = v.stdout + v.stderr
+assert "PASSED" in vt and "INTACT" in vt, vt
+recs = re.search(r"Verified Records:\s*(\d+)", vt).group(1)
+out(f"  {GRN}\u2713 chain intact{R}  ({recs} records)")
 pause(0.6)
 shutil.rmtree(WORK, ignore_errors=True)

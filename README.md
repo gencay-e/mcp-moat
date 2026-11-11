@@ -18,7 +18,7 @@ A policy proxy for MCP servers, written in Rust. `moat` sits between an MCP clie
 
 <img alt="Terminal recording: moat masks a key in project/notes.md, blocks a read of ../.ssh/id_ed25519, denies a write to project/.env because --no-prompt is set, and moat audit verify reports the hash chain as intact" src="https://raw.githubusercontent.com/gencay-e/mcp-moat/main/docs/images/moat-demo.gif" width="900">
 
-The recording shows real output of moat 0.2.2. The script that drives it is `scripts/demo.py`.
+A real run of moat 0.2.2 in front of the filesystem server. The verdict lines are shortened from moat's responses; `scripts/demo.py` drives the run and checks each line against the real output.
 
 A real run in front of `@modelcontextprotocol/server-filesystem`, allowed folder `/srv/demo/project`. The agent read `notes.md` (which holds a token), then tried `../private/keys.txt` twice:
 

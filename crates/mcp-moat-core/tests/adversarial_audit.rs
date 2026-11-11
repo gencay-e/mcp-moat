@@ -1110,7 +1110,10 @@ fn test_multipath_dest_path_and_target_path_jailing() {
         d_write
     );
 
-    // 4. copy_file with in-jail src and protected file in-jail dest_path
+    // 4. copy_file with in-jail src and protected file in-jail dest_path. The parent folder must
+    // exist: a path that cannot be resolved is blocked, not sent to the operator. Other tests share
+    // the jail, so the test creates it itself instead of relying on the test order.
+    std::fs::create_dir_all(jail.join(".git/hooks")).unwrap();
     let cp_protected = call(
         "copy_file",
         json!({

@@ -195,8 +195,10 @@ jobs:
           persist-credentials: false
 
       - name: Release notes from CHANGELOG.md
+        id: notes
         run: |
           version="${GITHUB_REF_NAME#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           awk -v v="$version" 'index($0, "## " v " ") == 1 {f=1; next} /^## / {if (f) exit} f' CHANGELOG.md > release-notes.md
           cat release-notes.md
           if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then test -s release-notes.md; fi
@@ -218,6 +220,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
+          name: mcp-moat ${{ steps.notes.outputs.version }}
           body_path: release-notes.md
           files: |
             artifacts/moat-*

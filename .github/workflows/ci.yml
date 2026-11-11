@@ -61,6 +61,19 @@ jobs:
       - name: Build release binaries
         run: cargo build --workspace --release --locked
 
+  cargo-audit:
+    name: Dependency audit (RustSec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Check Cargo.lock against the RustSec advisory database
+        run: cargo audit
+
   real-server:
     name: Real MCP servers (filesystem, git, everything)
     needs: test
@@ -96,7 +109,8 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - os: ubuntu-latest
+          # Built on the oldest Ubuntu available so that it runs on more Linux systems (glibc 2.35).
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact_name: moat-linux-x86_64.tar.gz
           - os: macos-latest
@@ -176,6 +190,17 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" 'index($0, "## " v " ") == 1 {f=1; next} /^## / {if (f) exit} f' CHANGELOG.md > release-notes.md
+          cat release-notes.md
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then test -s release-notes.md; fi
+
       - name: Download archives
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -193,6 +218,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
+          body_path: release-notes.md
           files: |
             artifacts/moat-*
             artifacts/SHA256SUMS

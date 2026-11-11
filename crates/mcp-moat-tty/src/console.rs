@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pass4_adversarial_session_approval_cache_isolation() {
+    fn test_session_approval_cache_isolation() {
         let mut cache = SessionApprovalCache::new();
 
         // 1. Operator allows an ordinary safe file always: write_file("src/safe.rs")

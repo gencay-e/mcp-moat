@@ -1,0 +1,2 @@
+# Test scripts, not part of the program: keep them out of the language statistics.
+scripts/*.ps1 linguist-detectable=false

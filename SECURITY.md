@@ -4,7 +4,7 @@
 
 Please report vulnerabilities privately and do not open a public issue. Use GitHub's private vulnerability reporting for `gencay-e/mcp-moat` (Security tab, "Report a vulnerability").
 
-Supported: the latest 0.1.x release.
+Supported: the latest 0.2.x release.
 
 ## What mcp-moat is
 
@@ -37,11 +37,11 @@ These are known and are not fixed in 0.2.0.
 **Audit log**
 * The hash chain detects changed, reordered or removed lines in the middle of a session.
 * It does not detect removal of lines at the end, removal of a whole session, removal of the file, or a log that was rebuilt from scratch. The hash is not keyed and there is no external anchor.
-* Write errors to the audit file are ignored.
+* If the audit file cannot be written, the action is not forwarded (fail closed).
 * If two sessions start in the same millisecond they can get the same session id and `moat audit verify` may report a false break.
 
 **Configuration**
-* Only `moat.toml` (and the old name `fence.toml`) are protected as configuration files by name. A file given with `--config` under another name is not.
+* `moat.toml` (and the old name `fence.toml`) and the file given with `--config` are protected. Other configuration files that the agent should not change must be listed in `protected_files`.
 
 **Experimental SSE proxy and bridge** (only built with `--features experimental-sse`)
 * No TLS. `https://` is rejected. Traffic to the upstream server is not encrypted.
@@ -56,4 +56,5 @@ These are known and are not fixed in 0.2.0.
 * Ctrl+C handling (child termination, exit code 130) has not been checked on every platform.
 
 **Supply chain**
-* Release archives come with a `SHA256SUMS` file. They are not signed. Dependencies are not audited with `cargo audit` or `cargo deny` yet.
+* Release archives come with a `SHA256SUMS` file. They are not signed.
+* CI checks the dependencies with `cargo audit` against the RustSec advisory database.

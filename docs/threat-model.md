@@ -11,8 +11,8 @@ A confused or manipulated agent, for example through a prompt injection in a web
 | Attack | What moat does | Where it is tested |
 |---|---|---|
 | Read or write outside the allowed folder (`/etc/passwd`, `..` segments, absolute paths) | Path jail: the request is rejected | `crates/mcp-moat-core/tests`, `scripts/real_server_check.py` (server-filesystem) |
-| Symlink pointing out of the folder | Symlinks are resolved and checked | no automated symlink test (see SECURITY.md) |
-| Changing the configuration (`moat.toml`) through the agent | Writes to the protected file are rejected | `crates/mcp-moat-core/tests` |
+| Symlink pointing out of the folder | Symlinks are resolved and checked | `scripts/real_server_check.py` on Linux; not on macOS or Windows |
+| Changing the configuration (`moat.toml`) through the agent | Writes to protected files need operator approval (denied with `--no-prompt`) | `crates/mcp-moat-core/tests` |
 | Secrets in server output (API keys, tokens, `key=value` lines, JSON text) | Known formats are replaced by `[MCP-MOAT-REDACTED-SECRET]` | `real_server_findings.rs`, `real_server_check.py` |
 | Destructive shell commands | Tokenized command filter, then operator prompt | `crates/mcp-moat-core/tests`; the filter is not a shell parser |
 | Altering the log afterwards | Hash chain over audit lines, checked by `moat audit verify` | `crates/mcp-moat-core/tests` |

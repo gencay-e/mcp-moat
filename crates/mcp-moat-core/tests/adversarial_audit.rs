@@ -28,9 +28,7 @@ fn call(name: &str, args: serde_json::Value) -> ToolCallParams {
     }
 }
 
-// ============================================================================
-// 1. ADVERSARIAL PATH EXTRACTION & VALIDATION
-// ============================================================================
+// Path extraction and validation
 
 #[test]
 fn test_adversarial_paths_empty_and_whitespace() {
@@ -376,9 +374,7 @@ fn test_adversarial_command_argument_types() {
     assert_eq!(ext_arr, Some("git status".to_string()));
 }
 
-// ============================================================================
-// 2. ADVERSARIAL PROTOCOL & URI PARSING
-// ============================================================================
+// Protocol and URI parsing
 
 #[test]
 fn test_adversarial_file_uri_edge_cases() {
@@ -411,9 +407,7 @@ fn test_adversarial_file_uri_edge_cases() {
     );
 }
 
-// ============================================================================
-// 3. ADVERSARIAL DLP PATTERNS
-// ============================================================================
+// Secret masking
 
 #[test]
 fn test_adversarial_dlp_patterns() {
@@ -487,9 +481,7 @@ fn test_adversarial_dlp_patterns() {
     assert!(nested.to_string().contains("[MCP-MOAT-REDACTED-SECRET]"));
 }
 
-// ============================================================================
-// 4. ADVERSARIAL AUDIT LOG TAMPER DETECTION
-// ============================================================================
+// Audit log tampering
 
 #[test]
 fn test_adversarial_audit_log_zero_and_single_events() {
@@ -677,12 +669,10 @@ fn test_adversarial_audit_log_cross_session_replay() {
     );
 }
 
-// ============================================================================
-// 5. PASS 4 DEEP ADVERSARIAL VERIFICATION TESTS
-// ============================================================================
+// Windows namespaces, protected targets and tool classification
 
 #[test]
-fn test_pass4_adversarial_windows_namespaces_and_devices() {
+fn test_windows_namespaces_and_devices() {
     let forbidden_paths = [
         r"\\?\C:\Windows\System32",
         "//?/C:/Windows/System32",
@@ -730,7 +720,7 @@ fn test_pass4_adversarial_windows_namespaces_and_devices() {
 }
 
 #[test]
-fn test_pass4_adversarial_audit_log_exhaustive_tamper_detection() {
+fn test_audit_log_exhaustive_tamper_detection() {
     let mut chain = AuditChain::new("sess-exhaustive");
     let mut events = Vec::new();
     for i in 0..10 {
@@ -814,7 +804,7 @@ fn test_pass4_adversarial_audit_log_exhaustive_tamper_detection() {
 }
 
 #[test]
-fn test_pass1_copy_file_and_modifying_tools_blocked_in_read_only_and_protected_files() {
+fn test_copy_file_and_modifying_tools_blocked_in_read_only_and_protected_files() {
     let jail = test_jail();
     let src_file = jail.join("innocent.txt");
     std::fs::write(&src_file, "clean content").unwrap();
@@ -865,7 +855,7 @@ fn test_pass1_copy_file_and_modifying_tools_blocked_in_read_only_and_protected_f
 }
 
 #[test]
-fn test_pass1_relative_protected_targets_require_approval() {
+fn test_relative_protected_targets_require_approval() {
     let jail = test_jail();
     let engine = PolicyEngine::new(PolicyConfig {
         allowed_paths: vec![jail.clone()],
@@ -906,7 +896,7 @@ fn test_pass1_relative_protected_targets_require_approval() {
 }
 
 #[test]
-fn test_pass1_unrecognized_tool_with_valid_jail_path_fails_closed() {
+fn test_unrecognized_tool_with_valid_jail_path_fails_closed() {
     let jail = test_jail();
     let engine = PolicyEngine::new(PolicyConfig {
         allowed_paths: vec![jail.clone()],
@@ -935,7 +925,7 @@ fn test_pass1_unrecognized_tool_with_valid_jail_path_fails_closed() {
 }
 
 #[test]
-fn test_pass5_adversarial_modifying_tools_coverage() {
+fn test_modifying_tools_coverage() {
     let jail = test_jail();
     let ro_engine = PolicyEngine::new(PolicyConfig {
         allowed_paths: vec![jail.clone()],
@@ -980,7 +970,7 @@ fn test_pass5_adversarial_modifying_tools_coverage() {
 }
 
 #[test]
-fn test_pass5_adversarial_dlp_json_key_value_pairs() {
+fn test_dlp_json_key_value_pairs() {
     let dlp = DlpEngine::new();
     let json_line = r#"{"status":"ok","password":"super_secret_password_123","api_key":"my_secret_api_key_456","client_secret":"my_client_secret_789"}"#;
     let (out, count) = dlp.sanitize_line(json_line);
@@ -996,7 +986,7 @@ fn test_pass5_adversarial_dlp_json_key_value_pairs() {
 }
 
 #[test]
-fn test_pass5_adversarial_junction_escape() {
+fn test_junction_escape() {
     let jail = test_jail().join("junc_test_jail");
     let outside = test_jail().parent().unwrap().join("junc_outside_target");
     let _ = std::fs::remove_dir_all(&jail);
@@ -1058,9 +1048,9 @@ fn test_pass5_adversarial_junction_escape() {
 }
 
 #[test]
-fn test_pass6_adversarial_multipath_dest_path_and_target_path_jailing() {
+fn test_multipath_dest_path_and_target_path_jailing() {
     let jail = test_jail();
-    let outside = std::env::temp_dir().join("moat_outside_pass6_target");
+    let outside = std::env::temp_dir().join("moat_outside_multipath_target");
     let _ = std::fs::remove_dir_all(&outside);
     std::fs::create_dir_all(&outside).unwrap();
     let outside_file = outside.join("evil.txt");
@@ -1154,7 +1144,7 @@ fn test_pass6_adversarial_multipath_dest_path_and_target_path_jailing() {
 }
 
 #[test]
-fn test_pass6_adversarial_kebab_and_camel_case_modifying_tools() {
+fn test_kebab_and_camel_case_modifying_tools() {
     let jail = test_jail();
     let ro_engine = PolicyEngine::new(PolicyConfig {
         allowed_paths: vec![jail.clone()],
@@ -1193,7 +1183,7 @@ fn test_pass6_adversarial_kebab_and_camel_case_modifying_tools() {
 }
 
 #[test]
-fn test_pass6_adversarial_dlp_secret_arrays_and_auth_keywords() {
+fn test_dlp_secret_arrays_and_auth_keywords() {
     let dlp = DlpEngine::new();
 
     // 1. Array of secret tokens
@@ -1223,7 +1213,7 @@ fn test_pass6_adversarial_dlp_secret_arrays_and_auth_keywords() {
 }
 
 #[test]
-fn test_pass7_adversarial_root_directory_deletion_requires_operator_approval() {
+fn test_root_directory_deletion_requires_operator_approval() {
     let jail = test_jail();
     let engine = PolicyEngine::new(PolicyConfig {
         allowed_paths: vec![jail.clone()],
@@ -1262,7 +1252,7 @@ fn test_pass7_adversarial_root_directory_deletion_requires_operator_approval() {
 }
 
 #[test]
-fn test_pass7_adversarial_kebab_case_shell_tools_and_modifying_tools() {
+fn test_kebab_case_shell_tools_and_modifying_tools() {
     let jail = test_jail();
     let ro_engine = PolicyEngine::new(PolicyConfig {
         allowed_paths: vec![jail.clone()],
@@ -1308,7 +1298,7 @@ fn test_pass7_adversarial_kebab_case_shell_tools_and_modifying_tools() {
 }
 
 #[test]
-fn test_pass7_adversarial_file_suffix_and_prefix_path_keys() {
+fn test_file_suffix_and_prefix_path_keys() {
     let jail = test_jail();
     let outside = std::env::temp_dir().join(format!("moat_p7_out_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&outside);
@@ -1368,7 +1358,7 @@ fn test_pass7_adversarial_file_suffix_and_prefix_path_keys() {
 }
 
 #[test]
-fn test_pass8_adversarial_file_uri_double_encoding_and_null_bytes() {
+fn test_file_uri_double_encoding_and_null_bytes() {
     // 1. Double percent-encoded traversal sequence (%252e%252e) must be strictly blocked
     let uri_double_encoded = "file:///path/%252e%252e/etc/shadow";
     assert!(
@@ -1395,7 +1385,7 @@ fn test_pass8_adversarial_file_uri_double_encoding_and_null_bytes() {
 }
 
 #[test]
-fn test_pass8_adversarial_deep_nesting_and_mixed_tool_call_arguments() {
+fn test_deep_nesting_and_mixed_tool_call_arguments() {
     let jail = test_jail();
     let outside = std::env::temp_dir().join(format!("moat_p8_out_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&outside);
@@ -1455,7 +1445,7 @@ fn test_pass8_adversarial_deep_nesting_and_mixed_tool_call_arguments() {
 }
 
 #[test]
-fn test_pass8_adversarial_powershell_evasion_exhaustive_patterns() {
+fn test_powershell_evasion_exhaustive_patterns() {
     let engine = test_engine();
 
     // Permutations of PowerShell encoded command execution
@@ -1482,7 +1472,7 @@ fn test_pass8_adversarial_powershell_evasion_exhaustive_patterns() {
 }
 
 #[test]
-fn test_pass8_adversarial_dlp_deep_json_and_token_redaction() {
+fn test_dlp_deep_json_and_token_redaction() {
     let dlp = DlpEngine::new();
 
     // 1. Deeply nested JSON (depth > 5) containing diverse API secrets
@@ -1521,7 +1511,7 @@ fn test_pass8_adversarial_dlp_deep_json_and_token_redaction() {
 }
 
 #[test]
-fn test_pass8_adversarial_audit_log_100_events_integrity() {
+fn test_audit_log_100_events_integrity() {
     let mut chain = AuditChain::new("stress-session-p8");
     let mut events = Vec::new();
 
@@ -1568,12 +1558,10 @@ fn test_pass8_adversarial_audit_log_100_events_integrity() {
     assert_eq!(fail_report.tampered_sequence, Some(57));
 }
 
-// ============================================================================
-// 10. PASS 10: EXHAUSTIVE PROTOCOL & CONCURRENCY VERIFICATION
-// ============================================================================
+// Path jail casing, protected targets and secret formats across many inputs
 
 #[test]
-fn test_pass10_exhaustive_path_jailing_casing_and_keys() {
+fn test_path_jailing_casing_and_keys() {
     let engine = test_engine();
     let jail = test_jail();
 
@@ -1714,7 +1702,7 @@ fn test_pass10_exhaustive_path_jailing_casing_and_keys() {
 }
 
 #[test]
-fn test_pass10_exhaustive_protected_targets_and_root_directory() {
+fn test_protected_targets_and_root_directory() {
     let jail = test_jail();
     let config = PolicyConfig {
         allowed_paths: vec![jail.clone()],
@@ -1765,7 +1753,7 @@ fn test_pass10_exhaustive_protected_targets_and_root_directory() {
 }
 
 #[test]
-fn test_pass10_dlp_exhaustive_secret_formats() {
+fn test_dlp_exhaustive_secret_formats() {
     let dlp = DlpEngine::new();
 
     let catalog: Vec<(&'static str, String)> = vec![

@@ -673,7 +673,7 @@ impl PolicyEngine {
         }
 
         if !extracted_paths.is_empty() {
-            // PASS 1: Validate EVERY path against boundary and lexical constraints first.
+            // Step 1: check every path against the jail and the lexical rules.
             // Fail-closed: If ANY path is invalid or out-of-jail, block IMMEDIATELY!
             // This prevents multi-path short-circuit bypasses (e.g. valid source + out-of-jail destination).
             let mut resolved_paths = Vec::new();
@@ -684,7 +684,7 @@ impl PolicyEngine {
                 }
             }
 
-            // PASS 2: Check if ANY resolved path targets a protected system file or audit log
+            // Step 2: does any resolved path target a protected file or the audit log?
             if is_write {
                 for (resolved_path, raw_str) in &resolved_paths {
                     if self.is_protected_target(resolved_path) {
@@ -699,7 +699,7 @@ impl PolicyEngine {
                     }
                 }
 
-                // PASS 3: Operator approval on write if configured
+                // Step 3: operator approval on write, if configured
                 if self.config.require_approval_on_write {
                     let first_resolved = resolved_paths.first().map(|(p, _)| p.clone());
                     return Decision::AskOperator {

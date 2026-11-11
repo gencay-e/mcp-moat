@@ -1,8 +1,8 @@
 # Security Model
 
-`mcp-moat` (`moat`) is a policy-enforcing proxy between an Model Context Protocol (MCP) client and an MCP server over `stdio` (and optionally an experimental HTTP+SSE transport behind `--features experimental-sse`). It inspects JSON-RPC 2.0 requests and responses to enforce directory jails, tool allowlists, command filters, output secret masking, and hash-chained audit logging.
+`mcp-moat` (`moat`) is a policy-enforcing proxy between a Model Context Protocol (MCP) client and an MCP server over `stdio` (and optionally an experimental HTTP+SSE transport behind `--features experimental-sse`). It inspects JSON-RPC 2.0 requests and responses to enforce directory jails, tool allowlists, command filters, output secret masking, and hash-chained audit logging.
 
-See also [`SECURITY.md`](SECURITY.md) for vulnerability reporting and known limitations, and [`docs/threat-model.md`](docs/threat-model.md) for the high-level threat model.
+See also [`SECURITY.md`](../SECURITY.md) for vulnerability reporting and known limitations, and [`threat-model.md`](threat-model.md) for the short version.
 
 ## Deployment Context
 
@@ -30,7 +30,7 @@ See also [`SECURITY.md`](SECURITY.md) for vulnerability reporting and known limi
 
 1. **Path Jail Enforcement (`crates/mcp-moat-core/src/policy.rs`):**
    * Every path argument and `file://` URI inspected by `PolicyEngine` must resolve inside one of the canonicalized `allowed_dirs` after symlink resolution, percent-decoding, Unicode normalization, and rejection of `..` traversal, UNC/NT namespace paths (`\\`, `//`, `\\?\`), Windows reserved device names (`CON`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`), and DOS 8.3 short-name segments (`~1`).
-   * Writes or edits targeting `moat.toml` or `fence.toml` must always be denied, even when located inside an allowed directory.
+   * Writes or edits targeting `moat.toml`, `fence.toml`, the `--config` file or an entry of `protected_files` require operator approval, even inside an allowed directory, and are denied under `--no-prompt`.
 2. **Default-Deny for Unknown Tools and Unverified File Tools (`crates/mcp-moat-core/src/policy.rs`):**
    * Any tool not explicitly listed in `always_allow_tools` (or enabled via `--preset`) requires operator approval (or is denied under `--no-prompt`).
    * Any tool whose name matches file-access patterns (`read_*`, `write_*`, `get_*`, etc.) and is not exempted in `non_file_tools` must supply at least one valid path argument verified against the path jail, or be blocked.
@@ -53,6 +53,6 @@ See also [`SECURITY.md`](SECURITY.md) for vulnerability reporting and known limi
 
 * **Direct OS syscalls made by a malicious MCP server binary** that do not pass paths through MCP tool arguments (`mcp-moat` is a protocol proxy, not an OS kernel sandbox).
 * **Filesystem TOCTOU races** between `mcp-moat`'s path check and the MCP server's subsequent `open()` syscall.
-* **Substring evasions in `blocked_commands`** (such as `rm  -rf /` with two spaces) that still trigger the interactive operator prompt (or are denied under `--no-prompt`), as documented in `SECURITY.md`.
+* **Command filter evasions** (variable expansion, aliases, wrapper scripts) that still trigger the operator prompt (or are denied under `--no-prompt`), as documented in `SECURITY.md`.
 * **Whole-file audit log deletion or full-chain recomputation** by an attacker who already has write access to the local audit file (audit hashes are unkeyed SHA-256).
 * **Known limitations of `experimental-sse`** (`crates/mcp-moat-proxy/src/sse.rs`, disabled by default) already listed in `SECURITY.md` (lack of TLS, unauthenticated session IDs, unbounded upstream header/line lengths).

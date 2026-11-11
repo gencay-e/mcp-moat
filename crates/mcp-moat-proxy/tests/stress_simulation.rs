@@ -65,7 +65,7 @@ fn format_bytes(bytes: usize) -> String {
     }
 }
 
-/// 1. Massiver Durchsatz-Test: 2.000 bis 5.000 sequentielle und pipelined JSON-RPC-Nachrichten durch die Stream-Engine.
+/// 1. Throughput: 2,000 to 5,000 sequential and pipelined JSON-RPC messages through the stream engine.
 #[tokio::test]
 async fn test_stress_1_massive_throughput_sequential_and_pipelined() {
     let mock_bin = env!("CARGO_BIN_EXE_mock_server");
@@ -116,7 +116,7 @@ async fn test_stress_1_massive_throughput_sequential_and_pipelined() {
     let init_val: Value = serde_json::from_str(&init_resp).unwrap();
     assert_eq!(init_val["id"].as_i64(), Some(0));
 
-    // Phase 1: 1,000 Sequentielle Round-Trips mit individueller RTT-Messung
+    // 1,000 sequential round trips, each timed
     println!("\n=== STRESS TEST 1.1: 1,000 Sequential Round-Trips ===");
     let mut latencies: Vec<Duration> = Vec::with_capacity(1000);
     let seq_start = Instant::now();
@@ -281,8 +281,8 @@ async fn test_stress_1_massive_throughput_sequential_and_pipelined() {
     println!("[STRESS TEST 1] SUCCESS: 5,000 Total Messages passed without frame drop or error.\n");
 }
 
-/// 2. Deadlock-Prüfung bei massivem Stderr-Overflow: Kindprozess spuckt >500 KiB ununterbrochen auf Stderr aus,
-/// während parallele Tool-Calls über Stdin/Stdout laufen.
+/// 2. No deadlock when the child writes more than 500 KiB to stderr while tool calls run over
+/// stdin/stdout at the same time.
 #[tokio::test]
 async fn test_stress_2_massive_stderr_overflow_deadlock_prevention() {
     let mock_bin = env!("CARGO_BIN_EXE_mock_server");
@@ -409,8 +409,8 @@ async fn test_stress_2_massive_stderr_overflow_deadlock_prevention() {
     println!("[STRESS TEST 2] SUCCESS: Zero Deadlocks detected under massive stderr overflow.\n");
 }
 
-/// 3. 16 MB Frame-Ceiling Simulation: Sende eine einzelne NDJSON-Zeile mit 17 MB Payload.
-/// Verifiziere sauberes Droppen und Fail-Closed JSON-RPC Fehler (-32700) ohne Panic, Deadlock oder OOM.
+/// 3. 16 MB frame limit: a single 17 MB NDJSON line is dropped and answered with a JSON-RPC error
+/// (-32700), without panic, deadlock or running out of memory.
 #[tokio::test]
 async fn test_stress_3_16mb_frame_ceiling_simulation() {
     let mock_bin = env!("CARGO_BIN_EXE_mock_server");
@@ -521,8 +521,7 @@ async fn test_stress_3_16mb_frame_ceiling_simulation() {
     println!("[STRESS TEST 3] SUCCESS: 17 MB frame rejected fail-closed (-32700), zero OOM, clean boundary shutdown.\n");
 }
 
-/// 4. Keepalive Ping-Bypass Simulation: Verifiziere unter künstlicher Last, dass ein MCP `ping`
-/// die Warteschlange überholt und in <5 ms beantwortet wird.
+/// 4. Under load, an MCP `ping` skips the queue and is answered in under 5 ms.
 #[tokio::test]
 async fn test_stress_4_keepalive_ping_bypass_under_load() {
     let mock_bin = env!("CARGO_BIN_EXE_mock_server");
@@ -639,8 +638,8 @@ async fn test_stress_4_keepalive_ping_bypass_under_load() {
     );
 }
 
-/// 5. Abrupter Client-Disconnect (Broken Pipe): Trenne Stdout des Clients abrupt während Datenübertragung.
-/// Verifiziere, dass der Child-Prozess und Proxy sauber terminieren und keine Zombie-Tasks verbleiben.
+/// 5. Client disconnect (broken pipe) during a transfer: the child process and the proxy exit cleanly
+/// and leave no tasks behind.
 #[tokio::test]
 async fn test_stress_5_abrupt_client_disconnect_broken_pipe() {
     let mock_bin = env!("CARGO_BIN_EXE_mock_server");

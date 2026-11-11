@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.2 (2026-11-12)
+
+* With `--no-prompt`, a call that needs approval was blocked with "Action was rejected by operator in prompt", although nobody was asked. The block message now says: "Approval required (protected file or unlisted tool), but --no-prompt is set, so the call was denied".
+* If no terminal is available for the approval prompt (or it cannot be read), the block message now says so instead of blaming the operator.
+* "Action was rejected by operator in prompt" is only used when the operator answered "no". The same three messages apply to the SSE proxy and bridge, including the JSON-RPC error for non-tool requests.
+* The audit log is unchanged: all denied approvals are still recorded with the operator decision `Deny`.
+* The README example for `moat audit verify` now shows the real output, including the `Path` line.
+* The README has a short terminal recording of a real run (`scripts/demo.py`).
+
 ## 0.2.1 (2026-11-11)
 
 No change to how moat behaves.

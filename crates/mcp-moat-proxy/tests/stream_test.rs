@@ -539,6 +539,67 @@ async fn test_operator_approval_and_session_cache() {
 }
 
 #[tokio::test]
+async fn test_no_prompt_denial_reason_is_truthful() {
+    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let args: Vec<String> = vec![];
+
+    let (mut client_tx, proxy_rx) = tokio::io::duplex(256 * 1024);
+    let (proxy_tx, client_rx) = tokio::io::duplex(256 * 1024);
+    let (proxy_err_tx, _client_err_rx) = tokio::io::duplex(256 * 1024);
+
+    let mut config = PolicyConfig::default();
+    config.require_approval_on_write = true;
+    let policy = PolicyEngine::new(config).unwrap();
+
+    // `--no-prompt`: no console at all
+    let proxy = ProxyServer::with_console(policy, None).with_io(proxy_rx, proxy_tx, proxy_err_tx);
+    let proxy_handle = tokio::spawn(async move { proxy.wrap_and_run(mock_bin, &args).await });
+
+    let mut framed_out =
+        FramedRead::new(client_rx, LinesCodec::new_with_max_length(16 * 1024 * 1024));
+
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "write_file",
+            "arguments": { "path": ".env", "content": "X=1" }
+        }
+    });
+    client_tx
+        .write_all(format!("{}\n", req).as_bytes())
+        .await
+        .unwrap();
+    client_tx.flush().await.unwrap();
+
+    let resp_line = tokio::time::timeout(Duration::from_secs(10), framed_out.next())
+        .await
+        .expect("no-prompt denial must not hang")
+        .unwrap()
+        .unwrap();
+    let resp: Value = serde_json::from_str(&resp_line).unwrap();
+
+    assert_eq!(resp["result"]["isError"].as_bool(), Some(true));
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("[MCP-MOAT: IMMUTABLE_POLICY_VIOLATION]\nAction blocked: "));
+    assert!(
+        text.contains(
+            "Approval required (protected file or unlisted tool), but --no-prompt is set, so the call was denied"
+        ),
+        "unexpected reason: {text}"
+    );
+    assert!(
+        !text.contains("rejected by operator in prompt"),
+        "must not claim an operator rejected it: {text}"
+    );
+    assert!(text.contains("INSTRUCTION FOR AGENT:"));
+
+    drop(client_tx);
+    let _ = proxy_handle.await;
+}
+
+#[tokio::test]
 async fn test_operator_rejection() {
     let mock_bin = env!("CARGO_BIN_EXE_mock_server");
     let args: Vec<String> = vec![];

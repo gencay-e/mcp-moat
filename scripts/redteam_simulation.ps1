@@ -247,7 +247,7 @@ Run-SessionTest -TestId "SH-01" -Category "3. Shell-Injection" `
     -Validator {
         param($resps, $err)
         $r = $resps[1] | ConvertFrom-Json -ErrorAction SilentlyContinue
-        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator" -or $r.result.content[0].text -match "metacharacters")) {
+        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator|--no-prompt is set" -or $r.result.content[0].text -match "metacharacters")) {
             return @{ Status = "BLOCKED"; Verdict = "Blocked via Shell Metacharacter Detection + Operator Deny" }
         }
         return @{ Status = "BYPASSED"; Verdict = "Pipe injection was executed! Resp: $($resps[1])" }
@@ -281,7 +281,7 @@ Run-SessionTest -TestId "SH-03" -Category "3. Shell-Injection" `
     -Validator {
         param($resps, $err)
         $r = $resps[1] | ConvertFrom-Json -ErrorAction SilentlyContinue
-        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator" -or $r.result.content[0].text -match "metacharacters")) {
+        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator|--no-prompt is set" -or $r.result.content[0].text -match "metacharacters")) {
             return @{ Status = "BLOCKED"; Verdict = "Blocked via Metacharacter Detection ('$') + Operator Deny" }
         }
         return @{ Status = "BYPASSED"; Verdict = "Command substitution was not blocked! Resp: $($resps[1])" }
@@ -298,7 +298,7 @@ Run-SessionTest -TestId "SH-04" -Category "3. Shell-Injection" `
     -Validator {
         param($resps, $err)
         $r = $resps[1] | ConvertFrom-Json -ErrorAction SilentlyContinue
-        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator" -or $r.result.content[0].text -match "metacharacters")) {
+        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator|--no-prompt is set" -or $r.result.content[0].text -match "metacharacters")) {
             return @{ Status = "BLOCKED"; Verdict = "Blocked via Metacharacter Detection ('`') + Operator Deny" }
         }
         return @{ Status = "BYPASSED"; Verdict = "Backticks were not blocked! Resp: $($resps[1])" }
@@ -315,7 +315,7 @@ Run-SessionTest -TestId "SH-05" -Category "3. Shell-Injection" `
     -Validator {
         param($resps, $err)
         $r = $resps[1] | ConvertFrom-Json -ErrorAction SilentlyContinue
-        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator" -or $r.result.content[0].text -match "metacharacters")) {
+        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator|--no-prompt is set" -or $r.result.content[0].text -match "metacharacters")) {
             return @{ Status = "BLOCKED"; Verdict = "Blocked via Metacharacter Detection ('&') + Operator Deny" }
         }
         return @{ Status = "BYPASSED"; Verdict = "Ampersands were not blocked! Resp: $($resps[1])" }
@@ -332,7 +332,7 @@ Run-SessionTest -TestId "SH-06" -Category "3. Shell-Injection" `
     -Validator {
         param($resps, $err)
         $r = $resps[1] | ConvertFrom-Json -ErrorAction SilentlyContinue
-        if ($r.result.isError -eq $true -and $r.result.content[0].text -match "Prohibited destructive command detected: contains 'powershell -enc'") {
+        if ($r.result.isError -eq $true -and $r.result.content[0].text -match "Prohibited destructive command detected: (contains|matches) 'powershell -enc'") {
             return @{ Status = "BLOCKED"; Verdict = "Blocked via Prohibited Destructive Command Pattern" }
         }
         return @{ Status = "BYPASSED"; Verdict = "Encoded powershell was not blocked! Resp: $($resps[1])" }
@@ -452,7 +452,7 @@ Run-SessionTest -TestId "SYS-01" -Category "5. Protected-Files" `
     -Validator {
         param($resps, $err)
         $r = $resps[1] | ConvertFrom-Json -ErrorAction SilentlyContinue
-        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator" -or $r.result.content[0].text -match "Action blocked")) {
+        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator|--no-prompt is set" -or $r.result.content[0].text -match "Action blocked")) {
             return @{ Status = "BLOCKED"; Verdict = "Protected System File Defense Triggered (Blocked / Operator Deny)" }
         }
         return @{ Status = "BYPASSED"; Verdict = "Write to .git was permitted! Resp: $($resps[1])" }
@@ -469,7 +469,7 @@ Run-SessionTest -TestId "SYS-02" -Category "5. Protected-Files" `
     -Validator {
         param($resps, $err)
         $r = $resps[1] | ConvertFrom-Json -ErrorAction SilentlyContinue
-        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator" -or $r.result.content[0].text -match "Action blocked")) {
+        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator|--no-prompt is set" -or $r.result.content[0].text -match "Action blocked")) {
             return @{ Status = "BLOCKED"; Verdict = "Protected System File Defense Triggered (Blocked / Operator Deny)" }
         }
         return @{ Status = "BYPASSED"; Verdict = "Write to .env was permitted! Resp: $($resps[1])" }
@@ -486,7 +486,7 @@ Run-SessionTest -TestId "SYS-03" -Category "5. Protected-Files" `
     -Validator {
         param($resps, $err)
         $r = $resps[1] | ConvertFrom-Json -ErrorAction SilentlyContinue
-        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator" -or $r.result.content[0].text -match "Action blocked")) {
+        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator|--no-prompt is set" -or $r.result.content[0].text -match "Action blocked")) {
             return @{ Status = "BLOCKED"; Verdict = "Protected System File Defense Triggered (Blocked / Operator Deny)" }
         }
         return @{ Status = "BYPASSED"; Verdict = "Write to moat.toml was permitted! Resp: $($resps[1])" }
@@ -503,7 +503,7 @@ Run-SessionTest -TestId "SYS-04" -Category "5. Protected-Files" `
     -Validator {
         param($resps, $err)
         $r = $resps[1] | ConvertFrom-Json -ErrorAction SilentlyContinue
-        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator" -or $r.result.content[0].text -match "Action blocked")) {
+        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator|--no-prompt is set" -or $r.result.content[0].text -match "Action blocked")) {
             return @{ Status = "BLOCKED"; Verdict = "Protected System File Defense Triggered (Blocked / Operator Deny)" }
         }
         return @{ Status = "BYPASSED"; Verdict = "Write to .vscode was permitted! Resp: $($resps[1])" }
@@ -520,7 +520,7 @@ Run-SessionTest -TestId "SYS-05" -Category "5. Protected-Files" `
     -Validator {
         param($resps, $err)
         $r = $resps[1] | ConvertFrom-Json -ErrorAction SilentlyContinue
-        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator" -or $r.result.content[0].text -match "Action blocked")) {
+        if ($r.result.isError -eq $true -and ($r.result.content[0].text -match "rejected by operator|--no-prompt is set" -or $r.result.content[0].text -match "Action blocked")) {
             return @{ Status = "BLOCKED"; Verdict = "Protected System File Defense Triggered (Blocked / Operator Deny)" }
         }
         return @{ Status = "BYPASSED"; Verdict = "Write to .github was permitted! Resp: $($resps[1])" }

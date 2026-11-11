@@ -269,6 +269,12 @@ async fn test_cli_wrap_no_prompt_auto_denies() {
     let resp: Value = serde_json::from_str(&resp_line).unwrap();
     assert_eq!(resp["id"].as_i64(), Some(20));
     assert_eq!(resp["result"]["isError"].as_bool(), Some(true));
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("but --no-prompt is set, so the call was denied"),
+        "unexpected reason: {text}"
+    );
+    assert!(!text.contains("rejected by operator in prompt"));
 
     drop(stdin);
     let _ = child.wait().await;

@@ -8,13 +8,17 @@ A policy proxy for MCP servers, written in Rust. `moat` sits between an MCP clie
 
 <img alt="moat sits between an MCP client such as Claude Desktop, Claude Code or Cursor and an MCP server, talks stdio to both, checks paths and commands, masks secrets, asks the operator on the terminal and writes a hash-chained audit log" src="https://raw.githubusercontent.com/gencay-e/mcp-moat/main/docs/images/moat-flow.svg" width="900">
 
-`moat` filters stdio traffic and prompts the operator, but it does not sandbox the server process itself. Read [SECURITY.md](https://github.com/gencay-e/mcp-moat/blob/main/SECURITY.md) for what it does not protect against, and [CHANGELOG.md](https://github.com/gencay-e/mcp-moat/blob/main/CHANGELOG.md) for the current release (`0.2.1`).
+`moat` filters stdio traffic and prompts the operator, but it does not sandbox the server process itself. Read [SECURITY.md](https://github.com/gencay-e/mcp-moat/blob/main/SECURITY.md) for what it does not protect against, and [CHANGELOG.md](https://github.com/gencay-e/mcp-moat/blob/main/CHANGELOG.md) for the current release (`0.2.2`).
 
 ---
 
 ## What it does
 
 <img alt="Four example tool calls: reading a file inside the project is allowed and a secret in it is masked, reading ../.ssh is blocked, writing project/.env and a shell command with a pipe both ask the operator" src="https://raw.githubusercontent.com/gencay-e/mcp-moat/main/docs/images/moat-example.svg" width="900">
+
+<img alt="Terminal recording: moat masks a key in project/notes.md, blocks a read of ../.ssh/id_ed25519, denies a write to project/.env because --no-prompt is set, and moat audit verify reports the hash chain as intact" src="https://raw.githubusercontent.com/gencay-e/mcp-moat/main/docs/images/moat-demo.gif" width="900">
+
+The recording shows real output of moat 0.2.2. The script that drives it is `scripts/demo.py`.
 
 A real run in front of `@modelcontextprotocol/server-filesystem`, allowed folder `/srv/demo/project`. The agent read `notes.md` (which holds a token), then tried `../private/keys.txt` twice:
 
@@ -26,6 +30,7 @@ $ moat audit query audit.jsonl --violations-only
 
 $ moat audit verify audit.jsonl
 [moat] Audit Log Integrity Check: PASSED
+  Path:                  audit.jsonl
   Verified Records:      6
   Cryptographic Chain:   INTACT (SHA-256)
 ```
@@ -54,7 +59,7 @@ Not covered: secrets in other formats, Base64-encoded secrets (unless the heuris
 
 ### Operator prompts
 
-For actions that need approval, `moat` asks on the terminal device directly (`/dev/tty` on Unix, `CONIN$` on Windows), so the JSON-RPC stream on stdin and stdout is not disturbed. File changes are shown as a diff. `[a]llow always` remembers the decision for the session. For shell tools the decision is remembered per exact action only. With `--no-prompt`, every action that needs approval is denied.
+For actions that need approval, `moat` asks on the terminal device directly (`/dev/tty` on Unix, `CONIN$` on Windows), so the JSON-RPC stream on stdin and stdout is not disturbed. File changes are shown as a diff. `[a]llow always` remembers the decision for the session. For shell tools the decision is remembered per exact action only. With `--no-prompt`, every action that needs approval is denied, and the block message says that `--no-prompt` is the reason.
 
 ### Stream handling
 

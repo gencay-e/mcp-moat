@@ -293,6 +293,8 @@ fn create_timestamp() -> String {
 pub struct SseProxyServer {
     policy: Arc<PolicyEngine>,
     console: Arc<Mutex<Option<DirectConsole>>>,
+    /// True when approval prompts were disabled on purpose (`--no-prompt`).
+    no_prompt: bool,
     audit_chain: Arc<Mutex<AuditChain>>,
     audit_path: Option<PathBuf>,
     audit_level: AuditLevel,
@@ -323,6 +325,7 @@ impl SseProxyServer {
         Ok(Self {
             policy: Arc::new(policy),
             console: Arc::new(Mutex::new(console)),
+            no_prompt: false,
             audit_chain: Arc::new(Mutex::new(AuditChain::new(session_id))),
             audit_path,
             audit_level,
@@ -337,6 +340,8 @@ impl SseProxyServer {
         target_url: &str,
     ) -> Result<Self> {
         let mut server = Self::new(policy, target_url)?;
+        // Passing no console here is the explicit `--no-prompt` mode.
+        server.no_prompt = console.is_none();
         server.console = Arc::new(Mutex::new(console));
         Ok(server)
     }
@@ -366,6 +371,7 @@ impl SseProxyServer {
                     let (stream, peer_addr) = accept_res?;
                     let policy = Arc::clone(&self.policy);
                     let console = Arc::clone(&self.console);
+                    let no_prompt = self.no_prompt;
                     let audit_chain = Arc::clone(&self.audit_chain);
                     let audit_path = self.audit_path.clone();
                     let audit_level = self.audit_level;
@@ -379,6 +385,7 @@ impl SseProxyServer {
                             peer_addr,
                             policy,
                             console,
+                            no_prompt,
                             audit_chain,
                             audit_path,
                             audit_level,
@@ -411,6 +418,7 @@ impl SseProxyServer {
         peer_addr: SocketAddr,
         policy: Arc<PolicyEngine>,
         console: Arc<Mutex<Option<DirectConsole>>>,
+        no_prompt: bool,
         audit_chain: Arc<Mutex<AuditChain>>,
         audit_path: Option<PathBuf>,
         audit_level: AuditLevel,
@@ -787,22 +795,28 @@ impl SseProxyServer {
                 Decision::AskOperator { action_summary, .. } => {
                     let console_clone = Arc::clone(&console);
                     let action_summary_clone = action_summary.clone();
-                    let approved = tokio::task::spawn_blocking(move || {
+                    let (approved, deny_cause) = tokio::task::spawn_blocking(move || {
                         let mut c_guard = console_clone.blocking_lock();
                         if let Some(console_inst) = c_guard.as_mut() {
-                            matches!(
-                                console_inst.ask_approval(&action_summary_clone, None),
-                                Ok(true)
-                            )
+                            match console_inst.ask_approval(&action_summary_clone, None) {
+                                Ok(true) => (true, crate::DenyCause::OperatorRejected),
+                                Ok(false) => (false, crate::DenyCause::OperatorRejected),
+                                Err(_) => (false, crate::DenyCause::NoTerminal),
+                            }
+                        } else if no_prompt {
+                            (false, crate::DenyCause::NoPrompt)
                         } else {
-                            false
+                            (false, crate::DenyCause::NoTerminal)
                         }
                     })
                     .await
-                    .unwrap_or(false);
+                    .unwrap_or((false, crate::DenyCause::NoTerminal));
 
                     if !approved {
-                        warn!("[moat] Operator REJECTED SSE Request: {}", action_summary);
+                        warn!(
+                            "[moat] SSE request denied ({:?}): {}",
+                            deny_cause, action_summary
+                        );
                         if let Some(ref log_p) = audit_path {
                             let mut chain = audit_chain.lock().await;
                             let event = chain.create_event(
@@ -829,7 +843,7 @@ impl SseProxyServer {
                             serde_json::to_string(
                                 &mcp_moat_core::JsonRpcResponse::tool_error_result(
                                     req_id,
-                                    "Action was rejected by operator in prompt",
+                                    deny_cause.tool_reason(),
                                 ),
                             )?
                         } else {
@@ -838,7 +852,7 @@ impl SseProxyServer {
                                 "id": req_id,
                                 "error": {
                                     "code": -32002,
-                                    "message": "[moat] Action rejected by operator"
+                                    "message": deny_cause.rpc_message()
                                 }
                             });
                             serde_json::to_string(&err_obj)?
@@ -982,6 +996,8 @@ impl SseProxyServer {
 pub struct SseBridgeServer {
     policy: Arc<PolicyEngine>,
     console: Arc<Mutex<Option<DirectConsole>>>,
+    /// True when approval prompts were disabled on purpose (`--no-prompt`).
+    no_prompt: bool,
     audit_chain: Arc<Mutex<AuditChain>>,
     audit_path: Option<PathBuf>,
     audit_level: AuditLevel,
@@ -1012,6 +1028,7 @@ impl SseBridgeServer {
         Ok(Self {
             policy: Arc::new(policy),
             console: Arc::new(Mutex::new(console)),
+            no_prompt: false,
             audit_chain: Arc::new(Mutex::new(AuditChain::new(session_id))),
             audit_path,
             audit_level,
@@ -1026,6 +1043,8 @@ impl SseBridgeServer {
         target_url: &str,
     ) -> Result<Self> {
         let mut server = Self::new(policy, target_url)?;
+        // Passing no console here is the explicit `--no-prompt` mode.
+        server.no_prompt = console.is_none();
         server.console = Arc::new(Mutex::new(console));
         Ok(server)
     }
@@ -1297,17 +1316,24 @@ impl SseBridgeServer {
                             action_summary, ..
                         } => {
                             let console_clone = Arc::clone(&self.console);
+                            let no_prompt = self.no_prompt;
                             let action_summary_clone = action_summary.clone();
-                            let approved = tokio::task::spawn_blocking(move || {
+                            let (approved, deny_cause) = tokio::task::spawn_blocking(move || {
                                 let mut c_guard = console_clone.blocking_lock();
                                 if let Some(console_inst) = c_guard.as_mut() {
-                                    matches!(console_inst.ask_approval(&action_summary_clone, None), Ok(true))
+                                    match console_inst.ask_approval(&action_summary_clone, None) {
+                                        Ok(true) => (true, crate::DenyCause::OperatorRejected),
+                                        Ok(false) => (false, crate::DenyCause::OperatorRejected),
+                                        Err(_) => (false, crate::DenyCause::NoTerminal),
+                                    }
+                                } else if no_prompt {
+                                    (false, crate::DenyCause::NoPrompt)
                                 } else {
-                                    false
+                                    (false, crate::DenyCause::NoTerminal)
                                 }
                             })
                             .await
-                            .unwrap_or(false);
+                            .unwrap_or((false, crate::DenyCause::NoTerminal));
 
                             if !approved {
                                 if let Some(ref log_p) = self.audit_path {
@@ -1329,7 +1355,7 @@ impl SseBridgeServer {
                                 }
                                 if !is_notification {
                                     let out_line = if req_method == "tools/call" {
-                                        let tool_err = mcp_moat_core::JsonRpcResponse::tool_error_result(req_id, "Action was rejected by operator in prompt");
+                                        let tool_err = mcp_moat_core::JsonRpcResponse::tool_error_result(req_id, deny_cause.tool_reason());
                                         format!("{}\n", serde_json::to_string(&tool_err)?)
                                     } else {
                                         let err_obj = json!({
@@ -1337,7 +1363,7 @@ impl SseBridgeServer {
                                             "id": req_id,
                                             "error": {
                                                 "code": -32002,
-                                                "message": "[moat] Action rejected by operator"
+                                                "message": deny_cause.rpc_message()
                                             }
                                         });
                                         format!("{}\n", serde_json::to_string(&err_obj)?)

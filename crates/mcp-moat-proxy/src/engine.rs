@@ -52,6 +52,8 @@ pub struct ProxyServer {
     policy: Arc<PolicyEngine>,
     dlp: Arc<DlpEngine>,
     console: Arc<Mutex<Option<DirectConsole>>>,
+    /// True when approval prompts were disabled on purpose (`--no-prompt`).
+    no_prompt: bool,
     session_cache: Arc<Mutex<SessionApprovalCache>>,
     audit_chain: Arc<std::sync::Mutex<AuditChain>>,
     audit_path: Option<PathBuf>,
@@ -82,6 +84,7 @@ impl ProxyServer {
             ),
             policy: Arc::new(policy),
             console: Arc::new(Mutex::new(console)),
+            no_prompt: false,
             session_cache: Arc::new(Mutex::new(SessionApprovalCache::new())),
             audit_chain: Arc::new(std::sync::Mutex::new(AuditChain::new(session_id))),
             audit_path,
@@ -97,6 +100,8 @@ impl ProxyServer {
         let audit_path = policy.config().audit_log.clone();
         let audit_level = policy.config().audit_level;
         let session_id = crate::new_session_id("sess");
+        // Passing no console here is the explicit `--no-prompt` mode.
+        let no_prompt = console.is_none();
 
         Self {
             dlp: Arc::new(
@@ -104,6 +109,7 @@ impl ProxyServer {
             ),
             policy: Arc::new(policy),
             console: Arc::new(Mutex::new(console)),
+            no_prompt,
             session_cache: Arc::new(Mutex::new(SessionApprovalCache::new())),
             audit_chain: Arc::new(std::sync::Mutex::new(AuditChain::new(session_id))),
             audit_path,
@@ -372,6 +378,7 @@ impl ProxyServer {
         // Task 1: Inbound stream (LLM Client in -> Child MCP server stdin)
         let policy = Arc::clone(&self.policy);
         let console = Arc::clone(&self.console);
+        let no_prompt = self.no_prompt;
         let session_cache = Arc::clone(&self.session_cache);
         let client_out_for_inbound = Arc::clone(&client_out_writer);
         let priority_tx_clone = priority_tx.clone();
@@ -748,6 +755,7 @@ impl ProxyServer {
 
                                     info!("Requesting operator approval for tool: {}", tool_name);
                                     let console_ref = Arc::clone(&console);
+                                    let no_prompt_ref = no_prompt;
                                     let session_cache_ref = Arc::clone(&session_cache);
                                     let normal_tx_approval = normal_tx_clone.clone();
                                     let client_out_approval = Arc::clone(&client_out_for_inbound);
@@ -802,22 +810,41 @@ impl ProxyServer {
                                                     )
                                                 };
                                                 if allowed {
-                                                    return ApprovalDecision::AllowAlways;
+                                                    return (
+                                                        ApprovalDecision::AllowAlways,
+                                                        crate::DenyCause::OperatorRejected,
+                                                    );
                                                 }
                                             }
 
                                             if let Some(c) = guard.as_mut() {
-                                                c.ask_approval_detailed(
+                                                match c.ask_approval_detailed(
                                                     &action_summary_clone,
                                                     diff_preview.as_deref(),
-                                                )
-                                                .unwrap_or(ApprovalDecision::Deny)
+                                                ) {
+                                                    Ok(d) => {
+                                                        (d, crate::DenyCause::OperatorRejected)
+                                                    }
+                                                    Err(_) => (
+                                                        ApprovalDecision::Deny,
+                                                        crate::DenyCause::NoTerminal,
+                                                    ),
+                                                }
+                                            } else if no_prompt_ref {
+                                                (ApprovalDecision::Deny, crate::DenyCause::NoPrompt)
                                             } else {
-                                                ApprovalDecision::Deny
+                                                (
+                                                    ApprovalDecision::Deny,
+                                                    crate::DenyCause::NoTerminal,
+                                                )
                                             }
                                         })
                                         .await
-                                        .unwrap_or(ApprovalDecision::Deny);
+                                        .unwrap_or((
+                                            ApprovalDecision::Deny,
+                                            crate::DenyCause::NoTerminal,
+                                        ));
+                                        let (decision, deny_cause) = decision;
 
                                         match decision {
                                             ApprovalDecision::AllowOnce => {
@@ -881,8 +908,8 @@ impl ProxyServer {
                                             }
                                             ApprovalDecision::Deny => {
                                                 warn!(
-                                                    "Operator rejected action: {}",
-                                                    tool_name_cloned
+                                                    "Approval denied ({:?}): {}",
+                                                    deny_cause, tool_name_cloned
                                                 );
                                                 if has_audit {
                                                     log_approval(
@@ -899,10 +926,11 @@ impl ProxyServer {
                                                     );
                                                 }
                                                 if !is_notification {
-                                                    let error_resp = JsonRpcResponse::tool_error_result(
-                                                        req_id,
-                                                        "Action was rejected by operator in prompt",
-                                                    );
+                                                    let error_resp =
+                                                        JsonRpcResponse::tool_error_result(
+                                                            req_id,
+                                                            deny_cause.tool_reason(),
+                                                        );
                                                     if let Ok(resp_json) =
                                                         serde_json::to_string(&error_resp)
                                                     {

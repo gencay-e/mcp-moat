@@ -5,6 +5,9 @@ use serde_json::Value;
 pub struct DlpEngine {
     patterns: Vec<Regex>,
     keywords: AhoCorasick,
+    /// Masks long Base64 runs with mixed character classes. Off by default: it also matches
+    /// image and audio data, lockfile hashes, long identifiers and public keys.
+    base64_heuristic: bool,
 }
 
 impl DlpEngine {
@@ -59,9 +62,13 @@ impl DlpEngine {
             Regex::new(r"(?i)\bmistral[a-z0-9_.\-]{0,40}\b[^\n]{0,80}?(?P<val>\b[A-Za-z0-9]{32}\b)").unwrap(),
             // Cohere tokens without the co_ prefix: 40 alphanumerics, gated by "cohere" context
             Regex::new(r"(?i)\bcohere\b[^\n]{0,80}?(?P<val>\b[A-Za-z0-9]{40}\b)").unwrap(),
+            // AWS secret access keys (40 chars), gated by "aws" or "secret" context so that the
+            // check also works without the Base64 heuristic
+            Regex::new(r"(?i)\b(?:aws|secret)[a-z0-9_.\-]{0,40}\b[^\n]{0,40}?(?P<val>\b[A-Za-z0-9/+]{40}\b)").unwrap(),
             // Base64-encoded secrets (standard alphabet), validated by character-class heuristic
             Regex::new(r"(?P<pre>^|[^A-Za-z0-9+/])(?P<b64>[A-Za-z0-9+/]{40,}={0,2})").unwrap(),
             // Base64url-encoded secrets (URL-safe alphabet), validated by character-class heuristic
+            // Hyphen at end of negated class to avoid being interpreted as range operator
             Regex::new(r"(?P<pre>^|[^A-Za-z0-9_-])(?P<b64>[A-Za-z0-9_-]{40,})").unwrap(),
         ];
 
@@ -131,12 +138,23 @@ impl DlpEngine {
             .build(sensitive_keywords)
             .unwrap();
 
-        Self { patterns, keywords }
+        Self {
+            patterns,
+            keywords,
+            base64_heuristic: false,
+        }
+    }
+
+    /// Enables the Base64 heuristic (`dlp_base64_heuristic = true` in `moat.toml`).
+    pub fn with_base64_heuristic(mut self, enabled: bool) -> Self {
+        self.base64_heuristic = enabled;
+        self
     }
 
     /// Fast scan to check if text might contain secrets
     pub fn contains_potential_secret(&self, text: &str) -> bool {
-        self.keywords.is_match(text) || Self::might_contain_base64_secret(text)
+        self.keywords.is_match(text)
+            || (self.base64_heuristic && Self::might_contain_base64_secret(text))
     }
 
     /// Cheap pre-filter for the Base64 heuristic. Long runs of mixed-case
@@ -212,7 +230,7 @@ impl DlpEngine {
                         part("vq2"),
                     )
                 } else if let Some(b64) = caps.name("b64") {
-                    if Self::is_likely_base64_secret(b64.as_str()) {
+                    if self.base64_heuristic && Self::is_likely_base64_secret(b64.as_str()) {
                         redaction_count += 1;
                         format!(
                             "{}[MCP-MOAT-REDACTED-SECRET]",
@@ -360,7 +378,7 @@ impl DlpEngine {
         // Fast-path pre-filter: skip AST parsing if nothing could possibly match.
         if !self.keywords.is_match(line)
             && !line.contains(r"\u")
-            && !Self::might_contain_base64_secret(line)
+            && !(self.base64_heuristic && Self::might_contain_base64_secret(line))
         {
             return (line.to_string(), 0);
         }
@@ -449,9 +467,20 @@ mod tests {
         let dlp = DlpEngine::new();
         let gl_tok = ["glpat", "1234567890abcdefghij"].join("-");
         let npm_tok = ["npm", "1234567890abcdef1234567890abcdef"].join("_");
-        let pypi_tok = ["pypi", "AgEIcHlwaS5vcmc", "12345678901234567890123456789012345678901234567890"].join("-");
-        let jwt_frag = ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "e30", "t-IDcSemACt8x4iTMCda8Yhe3iZaWbvV5XKSTbuAn0M"].join(".");
-        let sample = format!("gl: {gl_tok}, npm: {npm_tok}, pypi: {pypi_tok}, auth: Bearer {jwt_frag}");
+        let pypi_tok = [
+            "pypi",
+            "AgEIcHlwaS5vcmc",
+            "12345678901234567890123456789012345678901234567890",
+        ]
+        .join("-");
+        let jwt_frag = [
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "e30",
+            "t-IDcSemACt8x4iTMCda8Yhe3iZaWbvV5XKSTbuAn0M",
+        ]
+        .join(".");
+        let sample =
+            format!("gl: {gl_tok}, npm: {npm_tok}, pypi: {pypi_tok}, auth: Bearer {jwt_frag}");
         let (out, count) = dlp.sanitize_text(&sample);
         assert_eq!(count, 4);
         assert!(!out.contains(&gl_tok));
@@ -555,8 +584,12 @@ mod tests {
 
     #[test]
     fn test_dlp_base64_secret_heuristic() {
-        let dlp = DlpEngine::new();
-        let standard = ["QWxsIHlvdXIgYmFzZTY0IGFyZS", "BiZWxvbmcgdG8gdXMgMTIzNDU2Nzg5MA=="].concat();
+        let dlp = DlpEngine::new().with_base64_heuristic(true);
+        let standard = [
+            "QWxsIHlvdXIgYmFzZTY0IGFyZS",
+            "BiZWxvbmcgdG8gdXMgMTIzNDU2Nzg5MA==",
+        ]
+        .concat();
         let url_safe = ["JUpvlLneAyhNcpe84QYrUHWav", "-QJLlN4ncLnDDFWe6DF6g80WX6jyA"].concat();
         let sample = format!("payload: {} url: {}", standard, url_safe);
         let (out, count) = dlp.sanitize_text(&sample);
@@ -577,16 +610,97 @@ mod tests {
 
     #[test]
     fn test_dlp_base64_in_json_preserves_framing() {
-        let dlp = DlpEngine::new();
-        let secret = ["QWxsIHlvdXIgYmFzZTY0IGFyZS", "BiZWxvbmcgdG8gdXMgMTIzNDU2Nzg5MA=="].concat();
+        let dlp = DlpEngine::new().with_base64_heuristic(true);
+        let secret = "dGVzdGJhc2U2NGtleQdGVzdGJhc2U2NGtleQdGVzdGJhc2U2NGtleQdGVzdA==";
         let line = format!(
             r#"{{"jsonrpc":"2.0","id":1,"result":{{"data":"{}"}}}}"#,
             secret
         );
         let (out, count) = dlp.sanitize_line(&line);
         assert!(count >= 1);
-        assert!(!out.contains(&secret));
+        assert!(!out.contains(secret));
         let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
         assert!(parsed.to_string().contains("[MCP-MOAT-REDACTED-SECRET]"));
+    }
+
+    #[test]
+    fn test_dlp_base64_ignores_unix_pathlike() {
+        let dlp = DlpEngine::new();
+        let fake_path = "aGVscG1lbnQvY2hhcnRzL2tleQ==";
+        let (out, count) = dlp.sanitize_text(&format!("path: {}", fake_path));
+        assert_eq!(count, 0, "Base64-like string with / should not trigger");
+        assert!(out.contains(fake_path));
+    }
+
+    #[test]
+    fn test_dlp_base64_ignores_windows_pathlike() {
+        let dlp = DlpEngine::new();
+        let fake_path = "aGVscG1lbnAcY2hhcnRzAY2hYXJl";
+        let (out, count) = dlp.sanitize_text(&format!("path: {}", fake_path));
+        assert_eq!(count, 0, "Base64-like string with \\ should not trigger");
+        assert!(out.contains(fake_path));
+    }
+
+    #[test]
+    fn test_dlp_base64_ignores_ssh_private_key_block() {
+        let dlp = DlpEngine::new();
+        let sample = r#"-----BEGIN OPENSSH PRIVATE KEY-----
+LS0tLS1BRUdJTiBQUklWQVRFIEtFWS0tLS0t
+-----END OPENSSH PRIVATE KEY-----"#;
+        let (out, count) = dlp.sanitize_text(sample);
+        assert_eq!(
+            count, 1,
+            "SSH private key block should be redacted as one unit"
+        );
+        assert!(!out.contains("LS0tLS1BRUdJTiBQUklWQVRFIEtFWS0tLS0t"));
+        assert!(out.contains("[MCP-MOAT-REDACTED-SECRET]"));
+    }
+
+    #[test]
+    fn test_dlp_base64_ignores_git_sha() {
+        let dlp = DlpEngine::new();
+        let git_sha = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0";
+        let (out, count) = dlp.sanitize_text(&format!("commit: {}", git_sha));
+        assert_eq!(count, 0, "Git SHA-like hex string should not trigger");
+        assert!(out.contains(git_sha));
+    }
+
+    #[test]
+    fn test_dlp_base64_ignores_mime_boundary() {
+        let dlp = DlpEngine::new();
+        let boundary = "=_JjJwYOdKpE4dHvR2sT9uI1oP3mNB5vC7xK8yA0eFgH";
+        let sample = format!("Content-Type: multipart/mixed; boundary={}", boundary);
+        let (out, count) = dlp.sanitize_text(&sample);
+        assert_eq!(count, 0, "MIME boundary should not trigger");
+        assert!(out.contains(boundary));
+    }
+
+    #[test]
+    fn test_dlp_base64_heuristic_is_off_by_default() {
+        let dlp = DlpEngine::new();
+        for sample in [
+            "/home/gencay/Projects/MyApp2/src/components/Button.tsx",
+            r#"{"type":"image","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="}"#,
+            r#"{"type":"audio","data":"UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA1"}"#,
+            r#""integrity": "sha512-Xj2Kp9QmVb7Rr0uLWnT3yZ8fH1cA4sE6dG5hJ2kL0mN9oP8qR7sT6uV5wX4yZ3aB2cD1eF0gH==""#,
+            "fn testParseHandlesVeryLongIdentifierName42Correctly() {}",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq1Xk4m7LxP0zQ8bR3sT5uV9wY2aC4dE6fG8hJ0kL1 user@host",
+        ] {
+            let (out, count) = dlp.sanitize_text(sample);
+            assert_eq!(count, 0, "masked without opt-in: {sample}");
+            assert_eq!(out, sample);
+            let (line_out, line_count) = dlp.sanitize_line(sample);
+            assert_eq!(line_count, 0, "masked without opt-in (line): {sample}");
+            assert_eq!(line_out, sample);
+        }
+    }
+
+    #[test]
+    fn test_dlp_base64_heuristic_opt_in_masks_blob() {
+        let dlp = DlpEngine::new().with_base64_heuristic(true);
+        let (out, count) =
+            dlp.sanitize_text("blob QUtJQVhYWFhYWFhYWFhYWFhYWFhYWFhYOndKYWxyWFV0bkZFTUkK end");
+        assert_eq!(count, 1);
+        assert!(out.contains("[MCP-MOAT-REDACTED-SECRET]"));
     }
 }

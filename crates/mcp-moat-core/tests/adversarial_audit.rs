@@ -1488,7 +1488,13 @@ fn test_pass8_adversarial_dlp_deep_json_and_token_redaction() {
     // 1. Deeply nested JSON (depth > 5) containing diverse API secrets
     let test_sk = ["sk", "1234567890abcdef1234567890abcdef"].join("-");
     let test_ghp = ["ghp", "1234567890abcdef1234567890abcdef1234"].join("_");
-    let test_xoxb = ["xoxb", "123456789012", "1234567890123", "abcdefghijklmnopqrstuvwx"].join("-");
+    let test_xoxb = [
+        "xoxb",
+        "123456789012",
+        "1234567890123",
+        "abcdefghijklmnopqrstuvwx",
+    ]
+    .join("-");
 
     let mut payload = json!({
         "level1": {
@@ -1763,25 +1769,94 @@ fn test_pass10_dlp_exhaustive_secret_formats() {
     let dlp = DlpEngine::new();
 
     let catalog: Vec<(&'static str, String)> = vec![
-        ("OpenAI sk-...", ["sk", "abc1234567890abcdef1234567890"].join("-")),
-        ("Anthropic sk-ant-...", ["sk-ant-api03", "abcdef1234567890abcdef1234567890abcdef1234567890AA"].join("-")),
-        ("GitHub PAT", ["ghp", "1234567890abcdef1234567890abcdef1234"].join("_")),
-        ("GitHub fine-grained", ["github_pat", "11ABCD1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"].join("_")),
-        ("Stripe Live", ["sk", "live", "1234567890abcdef12345678"].join("_")),
-        ("Stripe Test", ["sk", "test", "1234567890abcdef12345678"].join("_")),
-        ("Stripe Restricted", ["rk", "live", "1234567890abcdef12345678"].join("_")),
-        ("Slack Bot", ["xoxb", "123456789012", "1234567890123", "abcdefghijklmnopqrstuvwx"].join("-")),
-        ("Google AI", ["AIza", "SyD1234567890abcdef1234567890abcde"].concat()),
-        ("HuggingFace", ["hf", "abcdefghijklmnopqrstuvwxyz12345678"].join("_")),
+        (
+            "OpenAI sk-...",
+            ["sk", "abc1234567890abcdef1234567890"].join("-"),
+        ),
+        (
+            "Anthropic sk-ant-...",
+            [
+                "sk-ant-api03",
+                "abcdef1234567890abcdef1234567890abcdef1234567890AA",
+            ]
+            .join("-"),
+        ),
+        (
+            "GitHub PAT",
+            ["ghp", "1234567890abcdef1234567890abcdef1234"].join("_"),
+        ),
+        (
+            "GitHub fine-grained",
+            [
+                "github_pat",
+                "11ABCD1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+            ]
+            .join("_"),
+        ),
+        (
+            "Stripe Live",
+            ["sk", "live", "1234567890abcdef12345678"].join("_"),
+        ),
+        (
+            "Stripe Test",
+            ["sk", "test", "1234567890abcdef12345678"].join("_"),
+        ),
+        (
+            "Stripe Restricted",
+            ["rk", "live", "1234567890abcdef12345678"].join("_"),
+        ),
+        (
+            "Slack Bot",
+            [
+                "xoxb",
+                "123456789012",
+                "1234567890123",
+                "abcdefghijklmnopqrstuvwx",
+            ]
+            .join("-"),
+        ),
+        (
+            "Google AI",
+            ["AIza", "SyD1234567890abcdef1234567890abcde"].concat(),
+        ),
+        (
+            "HuggingFace",
+            ["hf", "abcdefghijklmnopqrstuvwxyz12345678"].join("_"),
+        ),
         ("GitLab PAT", ["glpat", "abcdef1234567890_xyz12"].join("-")),
-        ("NPM Token", ["npm", "abcdef1234567890abcdef1234567890"].join("_")),
-        ("PyPI Token", ["pypi", "AgEIcHlwaS5vcmc", "CJDEyMzQ1Njc4LTBhYmMtZGVmMS0yMzQ1LTY3ODkwYWJjZGVmMQAC"].join("-")),
-        ("Bearer Token", format!("Bearer {}", ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0", "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"].join("."))),
+        (
+            "NPM Token",
+            ["npm", "abcdef1234567890abcdef1234567890"].join("_"),
+        ),
+        (
+            "PyPI Token",
+            [
+                "pypi",
+                "AgEIcHlwaS5vcmc",
+                "CJDEyMzQ1Njc4LTBhYmMtZGVmMS0yMzQ1LTY3ODkwYWJjZGVmMQAC",
+            ]
+            .join("-"),
+        ),
+        (
+            "Bearer Token",
+            format!(
+                "Bearer {}",
+                [
+                    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+                    "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0",
+                    "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+                ]
+                .join(".")
+            ),
+        ),
     ];
 
     for (label, pattern_str) in catalog {
         let (sanitized, count) = dlp.sanitize_text(&pattern_str);
-        assert!(count >= 1, "DLP redaction verification failed for pattern: {label}");
+        assert!(
+            count >= 1,
+            "DLP redaction verification failed for pattern: {label}"
+        );
         assert!(
             !sanitized.contains(&pattern_str),
             "Pattern was not redacted: {label}"

@@ -12,7 +12,7 @@ A policy proxy between an MCP client and an MCP server on stdio. It reduces the 
 
 ## Known limits
 
-These are known and are not fixed in 0.1.0.
+These are known and are not fixed in 0.2.0.
 
 **Command filter**
 * `blocked_commands` is tokenized before matching. Whitespace is collapsed, path prefixes are resolved to the program name (`/bin/rm` becomes `rm`) and combined short flags are compared as sets. `rm  -rf /`, `rm -r -f /`, `/bin/rm -fr /` and `sudo rm -rf /` match the default entries, while `rm -rf /tmp/build` does not and goes to the operator prompt.
@@ -30,8 +30,8 @@ These are known and are not fixed in 0.1.0.
 * The UNC and NT namespace checks are text checks. Besides `\\`, `//`, `\??\`, `/??/`, `\device\` and `/device/`, they reject `\GLOBAL??\`, `\GLOBALROOT\`, `\DosDevices\`, `\SystemRoot\`, `\BaseNamedObjects\`, `\ArcName\` and `\KernelObjects\`. Separators are normalized first, so mixed forms such as `\/?\C:\` are caught. They have not been tested against a real NTLM or SMB attack on Windows.
 
 **Secret masking**
-* Only known formats and long, mixed-class Base64/Base64url blobs are masked. Other secrets, short or low-complexity Base64 values, and secrets split over several messages are not found.
-* The Base64 heuristic can redact benign data that happens to look like an encoded secret.
+* Only known formats are masked. Other secrets, Base64-encoded secrets and secrets split over several messages are not found.
+* `dlp_base64_heuristic = true` masks long mixed-class Base64 runs. It also masks benign data such as images, file paths and hashes, so it is off by default.
 * Masking is meant for server output. It does not stop a server from leaking data in other ways.
 
 **Audit log**

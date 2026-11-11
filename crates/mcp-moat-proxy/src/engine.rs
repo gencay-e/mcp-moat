@@ -77,8 +77,10 @@ impl ProxyServer {
         let session_id = crate::new_session_id("sess");
 
         Self {
+            dlp: Arc::new(
+                DlpEngine::new().with_base64_heuristic(policy.config().dlp_base64_heuristic),
+            ),
             policy: Arc::new(policy),
-            dlp: Arc::new(DlpEngine::new()),
             console: Arc::new(Mutex::new(console)),
             session_cache: Arc::new(Mutex::new(SessionApprovalCache::new())),
             audit_chain: Arc::new(std::sync::Mutex::new(AuditChain::new(session_id))),
@@ -97,8 +99,10 @@ impl ProxyServer {
         let session_id = crate::new_session_id("sess");
 
         Self {
+            dlp: Arc::new(
+                DlpEngine::new().with_base64_heuristic(policy.config().dlp_base64_heuristic),
+            ),
             policy: Arc::new(policy),
-            dlp: Arc::new(DlpEngine::new()),
             console: Arc::new(Mutex::new(console)),
             session_cache: Arc::new(Mutex::new(SessionApprovalCache::new())),
             audit_chain: Arc::new(std::sync::Mutex::new(AuditChain::new(session_id))),

@@ -1059,7 +1059,10 @@ async fn test_cli_check_invalid_toml() {
         .expect("Failed to execute moat check");
 
     let _ = std::fs::remove_file(&config_path);
-    assert!(!output.status.success(), "moat check must reject invalid TOML");
+    assert!(
+        !output.status.success(),
+        "moat check must reject invalid TOML"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Failed to parse TOML") || stderr.contains("Invalid policy configuration"),
@@ -1087,7 +1090,10 @@ async fn test_cli_check_invalid_regex() {
         .expect("Failed to execute moat check");
 
     let _ = std::fs::remove_file(&config_path);
-    assert!(!output.status.success(), "moat check must reject invalid regex");
+    assert!(
+        !output.status.success(),
+        "moat check must reject invalid regex"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Invalid policy configuration"),
@@ -1113,7 +1119,10 @@ async fn test_cli_check_missing_allowed_path() {
         .expect("Failed to execute moat check");
 
     let _ = std::fs::remove_file(&config_path);
-    assert!(!output.status.success(), "moat check must reject a missing allowed path");
+    assert!(
+        !output.status.success(),
+        "moat check must reject a missing allowed path"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Allowed path does not exist"),
@@ -1147,10 +1156,7 @@ async fn test_cli_wrap_protects_custom_config_path() {
     let moat = get_moat_bin();
     let mock_server = get_mock_server_bin();
     let tmp_dir = std::env::temp_dir();
-    let config_path = tmp_dir.join(format!(
-        "moat_wrap_protected_{}.toml",
-        std::process::id()
-    ));
+    let config_path = tmp_dir.join(format!("moat_wrap_protected_{}.toml", std::process::id()));
     let content = format!(
         "allowed_paths = ['{}']\nrequire_approval_on_write = false\n",
         tmp_dir.display()

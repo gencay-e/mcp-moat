@@ -337,7 +337,8 @@ pub fn verify_audit_log(
                         tampered_sequence: Some(event.sequence),
                         error_message: Some(format!(
                             "Broken sequence continuity: expected sequence {}, found {}",
-                            *last_seq + 1, event.sequence
+                            *last_seq + 1,
+                            event.sequence
                         )),
                     });
                 }

@@ -84,6 +84,11 @@ pub struct PolicyConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub protected_files: Vec<PathBuf>,
 
+    /// Masks long Base64 runs in server output as possible secrets. Off by default because it
+    /// also masks image and audio data, lockfile hashes, long identifiers and public keys.
+    #[serde(default)]
+    pub dlp_base64_heuristic: bool,
+
     /// Named presets for specific MCP server types (filesystem, git, fetch, sqlite, memory)
     #[serde(default)]
     pub presets: HashMap<String, PresetConfig>,
@@ -200,6 +205,7 @@ impl Default for PolicyConfig {
             max_output_bytes: None,
             hidden_tools: Vec::new(),
             protected_files: Vec::new(),
+            dlp_base64_heuristic: false,
             presets: HashMap::new(),
         }
     }

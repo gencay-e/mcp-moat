@@ -318,13 +318,15 @@ impl SseProxyServer {
             }
         };
 
+        let dlp =
+            Arc::new(DlpEngine::new().with_base64_heuristic(policy.config().dlp_base64_heuristic));
         Ok(Self {
             policy: Arc::new(policy),
             console: Arc::new(Mutex::new(console)),
             audit_chain: Arc::new(Mutex::new(AuditChain::new(session_id))),
             audit_path,
             audit_level,
-            dlp: Arc::new(DlpEngine::new()),
+            dlp,
             target_url: parsed_target,
         })
     }
@@ -1005,13 +1007,15 @@ impl SseBridgeServer {
             }
         };
 
+        let dlp =
+            Arc::new(DlpEngine::new().with_base64_heuristic(policy.config().dlp_base64_heuristic));
         Ok(Self {
             policy: Arc::new(policy),
             console: Arc::new(Mutex::new(console)),
             audit_chain: Arc::new(Mutex::new(AuditChain::new(session_id))),
             audit_path,
             audit_level,
-            dlp: Arc::new(DlpEngine::new()),
+            dlp,
             target_url: parsed_target,
         })
     }

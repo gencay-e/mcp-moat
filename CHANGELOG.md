@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.0 (2026-11-11)
+
+### Added
+* `moat check` validates a configuration without starting a server: TOML syntax, `allowed_paths` (must exist and be directories), the audit log path and the `blocked_commands_regex` entries.
+* `moat completion bash|zsh|fish|powershell` prints shell completions.
+* Secret masking knows more formats: OpenAI `sk-proj-`, `sk-svcacct-` and `sk-admin-` keys, DeepSeek, Mistral and Cohere (with context), Perplexity, Voyage AI, AWS temporary session keys (`ASIA...`) and AWS secret access keys next to `aws` or `secret`.
+* `dlp_base64_heuristic` in `moat.toml` (default `false`). When on, long Base64 and Base64url runs with upper case, lower case and digits are masked as possible secrets. It is off by default because it also masks image and audio data, file paths, lockfile hashes, long identifiers and public keys.
+* `protected_files` in `moat.toml`. The file passed to `--config` is added automatically, so an agent cannot rewrite the policy that guards it.
+* The crates are published on crates.io (`cargo install --locked mcp-moat`).
+
+### Changed
+* `blocked_commands` entries are tokenized before matching: whitespace is collapsed, path prefixes such as `/bin/rm` are reduced to the program name, combined short flags are compared as sets, and `sudo` is skipped. `rm  -rf /`, `rm -r -f /`, `/bin/rm -fr /` and `sudo rm -rf /` now match `rm -rf /`. `rm -rf /tmp/build` does not match and goes to the operator prompt.
+* The UNC and NT path check also rejects `\GLOBAL??\`, `\GLOBALROOT\`, `\DosDevices\`, `\SystemRoot\`, `\BaseNamedObjects\`, `\ArcName\` and `\KernelObjects\`, and normalizes separators first.
+
+### Fixed
+* **Audit writes fail closed.** If the audit log cannot be created, opened, written or flushed, the action is not forwarded. Before, the error was logged and the call went through without an audit entry. The experimental SSE bridge stops forwarding events in the same case.
+* Audit error messages no longer contain the session id.
+
 ## 0.1.0 (2026-11-07)
 
 First release.

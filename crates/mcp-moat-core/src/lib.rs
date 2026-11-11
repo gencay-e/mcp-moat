@@ -11,9 +11,7 @@ pub use audit::{
 };
 pub use dlp::DlpEngine;
 pub use error::{MoatError, Result};
-pub use policy::{
-    validate_lexical_syntax, Decision, PolicyConfig, PolicyEngine, PresetConfig,
-};
+pub use policy::{validate_lexical_syntax, Decision, PolicyConfig, PolicyEngine, PresetConfig};
 pub use protocol::{
     parse_file_uri_to_path, JsonRpcError, JsonRpcRequest, JsonRpcResponse, ResourceParams,
     ToolCallParams,

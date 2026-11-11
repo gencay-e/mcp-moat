@@ -8,7 +8,7 @@ A policy proxy for MCP servers, written in Rust. `moat` sits between an MCP clie
 
 <img alt="moat sits between an MCP client such as Claude Desktop, Claude Code or Cursor and an MCP server, talks stdio to both, checks paths and commands, masks secrets, asks the operator on the terminal and writes a hash-chained audit log" src="docs/images/moat-flow.svg" width="900">
 
-`moat` filters stdio traffic and prompts the operator, but it does not sandbox the server process itself. Read [SECURITY.md](SECURITY.md) for what it does not protect against, and [CHANGELOG.md](CHANGELOG.md) for the current release (`0.1.0`).
+`moat` filters stdio traffic and prompts the operator, but it does not sandbox the server process itself. Read [SECURITY.md](SECURITY.md) for what it does not protect against, and [CHANGELOG.md](CHANGELOG.md) for the current release (`0.2.0`).
 
 ---
 
@@ -46,9 +46,11 @@ The output is shortened (timestamps and empty columns removed). The agent got `A
 
 ### Secret masking
 
-Output from the server (`stdout` and `stderr`) is scanned and known secret formats are replaced with `[MCP-MOAT-REDACTED-SECRET]`. Covered formats include OpenAI keys (including `sk-proj-`, `sk-svcacct-` and `sk-admin-`), Anthropic, DeepSeek, Mistral (with `mistral` context), Perplexity, Voyage AI, Cohere, Google AI Studio keys, GitHub tokens, GitLab tokens, Slack tokens, Stripe keys, npm and PyPI tokens, Hugging Face tokens, AWS access keys and temporary session keys (`ASIA...`), bearer tokens, PEM private key blocks, and long Base64/Base64url blobs with mixed character classes. Unicode-escaped variants (`\u0073\u006b-...`) are decoded before matching.
+Output from the server (`stdout` and `stderr`) is scanned and known secret formats are replaced with `[MCP-MOAT-REDACTED-SECRET]`. Covered formats include OpenAI keys (including `sk-proj-`, `sk-svcacct-` and `sk-admin-`), Anthropic, DeepSeek, Mistral (with `mistral` context), Perplexity, Voyage AI, Cohere, Google AI Studio keys, GitHub tokens, GitLab tokens, Slack tokens, Stripe keys, npm and PyPI tokens, Hugging Face tokens, AWS access keys and temporary session keys (`ASIA...`), AWS secret access keys next to `aws` or `secret`, bearer tokens and PEM private key blocks. Unicode-escaped variants (`\u0073\u006b-...`) are decoded before matching.
 
-Not covered: secrets in other formats, Base64 values below the length/complexity heuristic, and secrets split across several messages.
+`dlp_base64_heuristic = true` in `moat.toml` also masks long Base64 and Base64url runs with upper case, lower case and digits. It is off by default because it also masks image and audio data, file paths, lockfile hashes, long identifiers and public keys, which breaks those responses.
+
+Not covered: secrets in other formats, Base64-encoded secrets (unless the heuristic is on), and secrets split across several messages.
 
 ### Operator prompts
 
@@ -201,6 +203,9 @@ always_allow_tools = [
 compact_schemas = false
 # max_output_bytes = 16384
 hidden_tools = []
+
+# Mask long Base64 runs as possible secrets. Off by default, see "Secret masking".
+# dlp_base64_heuristic = false
 
 # Extra files that always require approval. The active --config file is added automatically.
 # protected_files = ["important.txt"]

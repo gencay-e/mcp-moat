@@ -13,6 +13,7 @@ if the git server is not available.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import queue
@@ -153,16 +154,21 @@ def git_server() -> None:
 def everything_server(work: Path) -> None:
     print("== reference server (server-everything)")
     config = work / "everything.toml"
-    config.write_text('always_allow_tools = ["echo", "get-env", "get-sum"]\nnon_file_tools = ["get-sum"]\n')
+    config.write_text('always_allow_tools = ["echo", "get-env", "get-sum", "get-tiny-image"]\n'
+                      'non_file_tools = ["get-sum", "get-tiny-image"]\n')
     env = {**os.environ, "OPENAI_API_KEY": "abcdefgh12345678", "DB_PASSWORD": "hunter2hunter2",
            "GROQ_KEY": "gsk_A1b2C3d4E5f6G7h8I9j0K1l2", "GITHUB_TOKEN": "ghp_" + "A" * 36}
     calls = [("echo", "echo", {"message": "hello"}), ("sum", "get-sum", {"a": 2, "b": 3}), ("env", "get-env", {}),
-             ("unknown", "trigger-long-running-operation", {"duration": 1, "steps": 1})]
+             ("unknown", "trigger-long-running-operation", {"duration": 1, "steps": 1}),
+             ("image", "get-tiny-image", {})]
     server = [shutil.which("npx") or "npx", "-y", "@modelcontextprotocol/server-everything"]
     res, _ = session([MOAT, "wrap", "--no-prompt", "--config", str(config), "--"] + server, calls, timeout=120, env=env)
     check("hello" in text_of(res["echo"]) and not is_blocked(res["echo"]), "everything: an allowed tool works", text_of(res["echo"]))
     check("5" in text_of(res["sum"]) and not is_blocked(res["sum"]), "everything: non_file_tools lets get-sum run", text_of(res["sum"]))
     check(is_blocked(res["unknown"]) and "not whitelisted" in text_of(res["unknown"]), "everything: a tool that is not listed is blocked", text_of(res["unknown"]))
+    images = [c for c in res["image"].get("result", {}).get("content", []) if c.get("type") == "image"]
+    png = base64.b64decode(images[0].get("data", "")) if images else b""
+    check(png.startswith(b"\x89PNG"), "everything: image data passes unchanged (valid PNG)", str(res["image"])[:200])
     dump = text_of(res["env"])
     for secret in ("abcdefgh12345678", "hunter2hunter2", "gsk_A1b2C3d4E5f6G7h8I9j0K1l2", "ghp_" + "A" * 36):
         check(secret not in dump, f"everything: environment dump hides {secret[:6]}...", dump[:100])
@@ -178,6 +184,8 @@ def main() -> int:
     (jail / "a.txt").write_text("hello from inside\n")
     (jail / "secrets.env").write_text(
         "GROQ=gsk_A1b2C3d4E5f6G7h8I9j0K1l2\nOPENAI_API_KEY=abcdefgh12345678\nDB_PASSWORD=hunter2hunter2\nDEBUG=1\n")
+    (jail / "base64_secret.txt").write_text(
+        "API_KEY=dGVzdERMT1dTU0VDUkVULWJhc2U2NA==\n")
     (jail / ".ssh" / "id_rsa").write_text(
         "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU=\n-----END OPENSSH PRIVATE KEY-----\n")
     (outside / "o.txt").write_text("TOP SECRET OUTSIDE\n")
@@ -191,6 +199,7 @@ def main() -> int:
         ("read_inside", "read_text_file", {"path": f"{J}/a.txt"}),
         ("read_secrets", "read_text_file", {"path": f"{J}/secrets.env"}),
         ("read_ssh", "read_text_file", {"path": f"{J}/.ssh/id_rsa"}),
+        ("read_base64_secret", "read_text_file", {"path": f"{J}/base64_secret.txt"}),
         ("read_outside", "read_text_file", {"path": f"{O}/o.txt"}),
         ("read_traversal", "read_text_file", {"path": f"{J}/../outside/o.txt"}),
         ("read_multi_mixed", "read_multiple_files", {"paths": [f"{J}/a.txt", f"{O}/o.txt"]}),
@@ -222,6 +231,7 @@ def main() -> int:
     check("gsk_A1b2" not in secrets, "Groq key is masked", secrets)
     check("abcdefgh12345678" not in secrets, "OPENAI_API_KEY value is masked", secrets)
     check("hunter2hunter2" not in secrets, "DB_PASSWORD value is masked", secrets)
+    check("dGVzdERMT1dTU0VDUkVULWJhc2U2NA==" not in secrets, "Base64-encoded secret is masked", secrets)
     check("DEBUG=1" in secrets, "harmless lines stay readable", secrets)
     check("BEGIN OPENSSH" not in text_of(res["read_ssh"]), "private key block is masked", text_of(res["read_ssh"]))
     for label in ("read_outside", "read_traversal", "read_multi_mixed", "list_outside", "media_outside",

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use mcp_moat_core::{
-    validate_lexical_syntax, verify_audit_log, AuditDecision, AuditEvent, AuditLevel,
-    CodegenFormat, PolicyConfig, PolicyEngine, TokenOptimizer,
+    verify_audit_log, AuditDecision, AuditEvent, AuditLevel, CodegenFormat, PolicyConfig,
+    PolicyEngine, TokenOptimizer,
 };
 use mcp_moat_proxy::ProxyServer;
 #[cfg(feature = "experimental-sse")]
@@ -434,11 +434,10 @@ async fn main() -> Result<()> {
                 }
             }
 
-            for path in &loaded.config.protected_files {
-                validate_lexical_syntax(&path.to_string_lossy()).with_context(|| {
-                    format!("Invalid protected_files entry '{}'", path.display())
-                })?;
-            }
+            // protected_files come from the operator, not from the agent, so the lexical rules for
+            // tool-call paths (8.3 short names, UNC) do not apply. Windows temp and profile paths
+            // such as C:\Users\RUNNER~1\... are legitimate here, and the --config file is added
+            // to this list automatically.
 
             let engine = PolicyEngine::new(loaded.config)
                 .with_context(|| format!("Invalid policy configuration from {source}"))?;

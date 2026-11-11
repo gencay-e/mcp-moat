@@ -17,6 +17,7 @@
 ### Fixed
 * **Audit writes fail closed.** If the audit log cannot be created, opened, written or flushed, the action is not forwarded. Before, the error was logged and the call went through without an audit entry. The experimental SSE bridge stops forwarding events in the same case.
 * Audit error messages no longer contain the session id.
+* `moat check` no longer rejects a `--config` file or `protected_files` entry whose path has an 8.3-style segment, such as the Windows temp folder `C:\Users\RUNNER~1\...`. The 8.3 rule is meant for paths in tool calls.
 
 ## 0.1.0 (2026-11-07)
 

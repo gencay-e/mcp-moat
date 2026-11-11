@@ -1044,6 +1044,30 @@ async fn test_cli_check_valid_config() {
 }
 
 #[tokio::test]
+async fn test_cli_check_accepts_short_name_config_path() {
+    // Windows CI temp paths look like C:\Users\RUNNER~1\AppData\Local\Temp. The --config file
+    // is added to protected_files and must not be rejected by the 8.3 rule for tool-call paths.
+    let moat = get_moat_bin();
+    let dir = std::env::temp_dir().join(format!("RUNNER~{}", std::process::id() % 10));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join(format!("moat_check_short_{}.toml", std::process::id()));
+    std::fs::write(&config_path, "allowed_paths = ['.']\n").unwrap();
+
+    let output = Command::new(moat)
+        .args(["check", "--config", config_path.to_str().unwrap()])
+        .output()
+        .await
+        .expect("Failed to execute moat check");
+
+    let _ = std::fs::remove_file(&config_path);
+    assert!(
+        output.status.success(),
+        "moat check must accept a config path with an 8.3-style segment. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
 async fn test_cli_check_invalid_toml() {
     let moat = get_moat_bin();
     let config_path = std::env::temp_dir().join(format!(

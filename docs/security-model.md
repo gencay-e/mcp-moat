@@ -29,11 +29,12 @@ See also [`SECURITY.md`](../SECURITY.md) for vulnerability reporting and known l
 ## Security Invariants
 
 1. **Path Jail Enforcement (`crates/mcp-moat-core/src/policy.rs`):**
-   * Every path argument and `file://` URI inspected by `PolicyEngine` must resolve inside one of the canonicalized `allowed_dirs` after symlink resolution, percent-decoding, Unicode normalization, and rejection of `..` traversal, UNC/NT namespace paths (`\\`, `//`, `\\?\`), Windows reserved device names (`CON`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`), and DOS 8.3 short-name segments (`~1`).
+   * Every path argument and `file://` URI inspected by `PolicyEngine` must resolve inside one of the canonicalized `allowed_paths` after symlink resolution, percent-decoding, Unicode normalization, and rejection of `..` traversal, UNC/NT namespace paths (`\\`, `//`, `\\?\`), Windows reserved device names (`CON`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`), and DOS 8.3 short-name segments (`~1`).
    * Writes or edits targeting `moat.toml`, `fence.toml`, the `--config` file or an entry of `protected_files` require operator approval, even inside an allowed directory, and are denied under `--no-prompt`.
 2. **Default-Deny for Unknown Tools and Unverified File Tools (`crates/mcp-moat-core/src/policy.rs`):**
-   * Any tool not explicitly listed in `always_allow_tools` (or enabled via `--preset`) requires operator approval (or is denied under `--no-prompt`).
-   * Any tool whose name matches file-access patterns (`read_*`, `write_*`, `get_*`, etc.) and is not exempted in `non_file_tools` must supply at least one valid path argument verified against the path jail, or be blocked.
+   * A tool is allowed without the operator only if it is listed in `always_allow_tools` or `custom_always_allow_tools`, is enabled by a preset, or has the exact name of a known standard filesystem tool (for example `read_file`, `read_text_file`, `write_file`, `directory_tree`). A name that only matches a generic pattern (`read_*`, `write_*`, `get_*`, `*_file`) never authorizes a tool.
+   * Path arguments of every call are checked against the path jail first. After that, an unknown tool that does not modify is blocked, and an unknown tool that modifies requires operator approval (denied under `--no-prompt`).
+   * Any tool whose name matches file-access patterns and is not exempted in `non_file_tools` must supply at least one valid path argument verified against the path jail, or be blocked. This includes calls with no arguments, empty arguments or `null`. `list_allowed_directories` and a few other standard tools that take no path are exempt.
 3. **Out-of-Band Operator Prompting (`crates/mcp-moat-tty/src/console.rs`):**
    * Approval prompts must read from the controlling terminal (`/dev/tty` on Unix, `CONIN$` on Windows), never from `stdin` (which carries the agent's JSON-RPC stream). If the terminal cannot be opened or `--no-prompt` is active, any action requiring approval must fail closed (`Deny`).
 4. **DLP Secret Redaction on Upstream Responses (`crates/mcp-moat-core/src/dlp.rs`):**
@@ -43,7 +44,7 @@ See also [`SECURITY.md`](../SECURITY.md) for vulnerability reporting and known l
 
 ## In-Scope Vulnerability Classes
 
-* **Path jail bypass** in `crates/mcp-moat-core/src/policy.rs` allowing `tools/call` or `resources/read` to access paths outside `allowed_dirs` or modify `moat.toml`.
+* **Path jail bypass** in `crates/mcp-moat-core/src/policy.rs` allowing `tools/call` or `resources/read` to access paths outside `allowed_paths` or modify `moat.toml`.
 * **Policy or approval bypass** in `crates/mcp-moat-proxy/src/engine.rs` or `crates/mcp-moat-core/src/policy.rs` allowing unapproved tools, write operations in `--read-only` mode, or blocked commands to execute without operator confirmation.
 * **JSON-RPC framing / smuggling flaws** in `crates/mcp-moat-proxy/src/engine.rs` or `crates/mcp-moat-core/src/protocol.rs` that forward uninspected tool calls to the child server.
 * **Denial of Service / panic in proxy runtime** triggered by malformed JSON-RPC messages or oversized payloads (`unwrap()`/`expect()` on untrusted input in `crates/mcp-moat-core` or `crates/mcp-moat-proxy`).

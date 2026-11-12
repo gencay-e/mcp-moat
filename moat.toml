@@ -1,23 +1,23 @@
 # ==============================================================================
 # mcp-moat Security Configuration (moat.toml)
-# Zero-Trust Stdio/TTY Runtime Firewall for Model Context Protocol (MCP)
+# MCP stdio policy proxy
 # ==============================================================================
 
 # Allowed root paths for filesystem access (path jailing).
 # Relative paths are resolved against the current working directory.
-# Paths outside this boundary are blocked with fail-closed security errors.
+# Paths outside this boundary are blocked.
 allowed_paths = ["."]
 
-# Enforce strict read-only mode across all tools.
-# When set to true, all modifying operations (write, edit, delete, append) are prohibited.
+# Blocks tools classified as modifying by the built-in and configured tool-name rules.
+# Does not sandbox the server process.
 read_only = false
 
-# Require explicit operator approval (via direct TTY console) for file write actions,
+# Require operator approval (via the terminal) for file write actions,
 # even if the target file is located inside an allowed path.
 # Sensitive system files (e.g., moat.toml, .git, .env) ALWAYS require approval regardless.
 require_approval_on_write = false
 
-# Destructive shell command patterns that are blocked immediately (case-insensitive).
+# Shell command patterns that are blocked (case-insensitive).
 blocked_commands = [
     "rm -rf /",
     ":(){ :|:& };:",
@@ -27,9 +27,9 @@ blocked_commands = [
     "powershell -enc",
 ]
 
-# Read-only tools that are whitelisted and never require interactive operator approval.
-# Unrecognized tools not in this list and not performing verified path-bound writes
-# fail-closed according to zero-trust principles.
+# Tools that are allowed without operator approval (after the path checks).
+# Tools of standard filesystem servers are recognized by exact name. Other unlisted tools
+# are blocked, or need operator approval if they look like they modify files.
 always_allow_tools = [
     "list_directory",
     "read_file",
@@ -46,9 +46,9 @@ always_allow_tools = [
 # The git preset already sets the common ones.
 # ignore_path_keys = ["target"]
 
-# Forensic Audit Logging & Tamper-Evidence (SHA-256 Hash-Chaining)
-# When set, all incoming/outgoing MCP messages, decisions, and DLP redactions
-# are recorded to this file with sequential cryptographic hash chaining.
+# Audit log with SHA-256 hash chain (tamper-evident, not tamper-proof).
+# When set, MCP messages, decisions and DLP redactions
+# are recorded to this file.
 # audit_log = ".moat/audit.jsonl"
 
 # Granularity of forensic audit logging: "full", "decisions_only", or "violations_only"
@@ -66,7 +66,7 @@ compact_schemas = false
 # token explosions (e.g., 16384 for 16 KB). Omit or comment out for unlimited output.
 # max_output_bytes = 16384
 
-# Explicitly hide specific tools from `tools/list` discovery AND block them on `tools/call`.
+# Hide specific tools from `tools/list` discovery AND block them on `tools/call`.
 hidden_tools = []
 
 # ==============================================================================

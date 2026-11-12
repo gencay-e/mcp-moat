@@ -552,10 +552,31 @@ impl PolicyEngine {
     }
 
     fn is_non_file_tool(&self, tool_name: &str) -> bool {
+        is_builtin_pathless_tool(tool_name)
+            || self
+                .config
+                .non_file_tools
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(tool_name))
+    }
+
+    /// True if the tool is listed in `always_allow_tools` or `custom_always_allow_tools`
+    /// (presets fill these lists).
+    fn is_listed_allowed(&self, tool_name: &str) -> bool {
         self.config
-            .non_file_tools
+            .always_allow_tools
             .iter()
-            .any(|t| t.eq_ignore_ascii_case(tool_name))
+            .any(|t| t == tool_name)
+            || self
+                .config
+                .custom_always_allow_tools
+                .iter()
+                .any(|t| t == tool_name)
+    }
+
+    /// True if the tool is listed as allowed or its exact name is a known standard file tool.
+    fn is_explicitly_allowed(&self, tool_name: &str) -> bool {
+        self.is_listed_allowed(tool_name) || is_standard_file_tool(tool_name)
     }
 
     pub fn extract_all_path_arguments(&self, call: &ToolCallParams) -> Vec<String> {
@@ -653,18 +674,11 @@ impl PolicyEngine {
 
         // 4. Extract and validate ALL target paths (single paths, arrays, source/destination)
         let extracted_paths = self.extract_all_path_arguments(call);
-        let has_args = match &call.arguments {
-            Some(serde_json::Value::Object(map)) => !map.is_empty(),
-            Some(serde_json::Value::Array(arr)) => !arr.is_empty(),
-            Some(_) => true,
-            None => false,
-        };
 
-        // Fail-closed: If a file/path-based tool receives arguments but no path could be extracted,
-        // it must NEVER be allowed or prompted automatically!
+        // Fail-closed: If a file/path-based tool has no path that could be extracted (also when it
+        // has no arguments at all), it must NEVER be allowed or prompted automatically!
         if is_file_tool(tool_name)
             && !self.is_non_file_tool(tool_name)
-            && has_args
             && extracted_paths.is_empty()
         {
             return Decision::Block(
@@ -710,20 +724,22 @@ impl PolicyEngine {
                 }
             }
 
-            // Fail-closed: If a tool provides a path in jail, it must still be a recognized file tool,
-            // modifying tool, or always-allowed tool. Unrecognized tools cannot bypass authorization!
-            let is_always_allowed = self
+            // A path in the jail is not enough. The tool must be explicitly allowed (listed, enabled
+            // by a preset or a known standard file tool) or be configured as a modifying tool.
+            // A name that only matches a generic file-name pattern is treated as an unknown tool.
+            let is_configured_modifying = self
                 .config
-                .always_allow_tools
+                .custom_modifying_tools
                 .iter()
-                .any(|t| t == tool_name)
-                || self
-                    .config
-                    .custom_always_allow_tools
-                    .iter()
-                    .any(|t| t == tool_name);
-
-            if !is_file_tool(tool_name) && !is_write && !is_always_allowed {
+                .any(|t| t.eq_ignore_ascii_case(tool_name));
+            if !self.is_explicitly_allowed(tool_name) && !is_configured_modifying {
+                if is_write {
+                    return Decision::AskOperator {
+                        tool_name: tool_name.to_string(),
+                        target_path: resolved_paths.first().map(|(p, _)| p.clone()),
+                        action_summary: summarize_call(call),
+                    };
+                }
                 return Decision::Block(format!(
                     "Unrecognized tool '{}' is not whitelisted by policy",
                     tool_name
@@ -734,18 +750,7 @@ impl PolicyEngine {
         }
 
         // 5. Always allowed read tools (if no path argument was extracted)
-        let is_always_allowed = self
-            .config
-            .always_allow_tools
-            .iter()
-            .any(|t| t == tool_name)
-            || self
-                .config
-                .custom_always_allow_tools
-                .iter()
-                .any(|t| t == tool_name);
-
-        if is_always_allowed {
+        if self.is_listed_allowed(tool_name) || (is_standard_file_tool(tool_name) && !is_write) {
             return Decision::Allow;
         }
 
@@ -1317,13 +1322,20 @@ fn is_protected_system_file(path: &Path) -> bool {
         || s.ends_with("/.gitconfig")
 }
 
-fn is_file_tool(tool_name: &str) -> bool {
-    let lower_raw = tool_name.to_lowercase();
-    let lower = lower_raw.replace('-', "_");
-    let standard = matches!(
+/// Exact names of the tools of common MCP filesystem servers (for example
+/// `@modelcontextprotocol/server-filesystem`) and similar file tools. A call to one of these with
+/// a path inside the jail does not need to be listed in `always_allow_tools`. Name patterns alone
+/// never authorize a tool.
+fn is_standard_file_tool(tool_name: &str) -> bool {
+    let lower = tool_name.to_lowercase().replace('-', "_");
+    matches!(
         lower.as_str(),
         "read_file"
+            | "read_text_file"
+            | "read_media_file"
             | "list_directory"
+            | "list_directory_with_sizes"
+            | "directory_tree"
             | "search_files"
             | "grep"
             | "read_multiple_files"
@@ -1337,13 +1349,6 @@ fn is_file_tool(tool_name: &str) -> bool {
             | "read_lines"
             | "get_file_info"
             | "list_allowed_directories"
-            | "list_tables"
-            | "describe_table"
-            | "show_schema"
-            | "read_query"
-            | "read_graph"
-            | "search_nodes"
-            | "open_nodes"
             | "write_file"
             | "edit_file"
             | "create_file"
@@ -1386,9 +1391,32 @@ fn is_file_tool(tool_name: &str) -> bool {
             | "overwrite"
             | "clean_dir"
             | "purge_dir"
-            // read-only tool of the official filesystem MCP server
-            | "directory_tree"
-    );
+    )
+}
+
+/// Standard tools that take no path. They are exempt from the path check.
+fn is_builtin_pathless_tool(tool_name: &str) -> bool {
+    let lower = tool_name.to_lowercase().replace('-', "_");
+    matches!(
+        lower.as_str(),
+        "list_allowed_directories" | "list_tables" | "show_schema" | "read_graph"
+    )
+}
+
+fn is_file_tool(tool_name: &str) -> bool {
+    let lower_raw = tool_name.to_lowercase();
+    let lower = lower_raw.replace('-', "_");
+    let standard = is_standard_file_tool(tool_name)
+        || matches!(
+            lower.as_str(),
+            "describe_table"
+                | "read_query"
+                | "search_nodes"
+                | "open_nodes"
+                | "list_tables"
+                | "show_schema"
+                | "read_graph"
+        );
     standard
         || lower.starts_with("read_")
         || lower.starts_with("list_")

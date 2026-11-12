@@ -1868,3 +1868,91 @@ fn test_dlp_exhaustive_secret_formats() {
         assert!(json_sanitized.contains("[MCP-MOAT-REDACTED-SECRET]"));
     }
 }
+
+// Tool authorization: a valid path alone does not authorize a tool
+
+fn in_jail(name: &str) -> String {
+    test_jail().join(name).to_string_lossy().into_owned()
+}
+
+#[test]
+fn test_generic_name_pattern_does_not_authorize() {
+    let engine = test_engine();
+    for name in ["read_sensitive_data", "get_secrets"] {
+        let d = engine.evaluate_tool_call(&call(name, json!({"path": in_jail("a.txt")})));
+        assert!(
+            matches!(&d, Decision::Block(m) if m.contains("not whitelisted")),
+            "{name}: {d:?}"
+        );
+    }
+    let d = engine.evaluate_tool_call(&call("write_anything", json!({"path": in_jail("a.txt")})));
+    assert!(matches!(d, Decision::AskOperator { .. }), "{d:?}");
+}
+
+#[test]
+fn test_generic_name_pattern_still_checks_jail() {
+    let engine = test_engine();
+    let d = engine.evaluate_tool_call(&call("read_sensitive_data", json!({"path": "/etc/passwd"})));
+    assert!(matches!(d, Decision::Block(_)));
+}
+
+#[test]
+fn test_generic_name_listed_in_custom_always_allow_is_allowed() {
+    let engine = PolicyEngine::new(PolicyConfig {
+        allowed_paths: vec![test_jail()],
+        custom_always_allow_tools: vec![
+            "read_sensitive_data".into(),
+            "write_anything".into(),
+            "get_secrets".into(),
+        ],
+        ..PolicyConfig::default()
+    })
+    .unwrap();
+    for name in ["read_sensitive_data", "write_anything", "get_secrets"] {
+        let d = engine.evaluate_tool_call(&call(name, json!({"path": in_jail("a.txt")})));
+        assert!(matches!(d, Decision::Allow), "{name}: {d:?}");
+    }
+}
+
+#[test]
+fn test_standard_filesystem_tool_names_are_allowed_in_jail() {
+    let engine = test_engine();
+    for name in [
+        "read_text_file",
+        "read_media_file",
+        "list_directory_with_sizes",
+        "directory_tree",
+        "get_file_info",
+    ] {
+        let d = engine.evaluate_tool_call(&call(name, json!({"path": in_jail("a.txt")})));
+        assert!(matches!(d, Decision::Allow), "{name}: {d:?}");
+    }
+}
+
+#[test]
+fn test_pathless_file_tool_calls_are_blocked() {
+    let engine = test_engine();
+    let d = engine.evaluate_tool_call(&call("read_file", serde_json::Value::Null));
+    assert!(matches!(d, Decision::Block(_)), "{d:?}");
+    let cases = [
+        call("read_file", json!({})),
+        ToolCallParams {
+            name: "read_file".into(),
+            arguments: None,
+        },
+    ];
+    for c in &cases {
+        let d = engine.evaluate_tool_call(c);
+        assert!(
+            matches!(&d, Decision::Block(m) if m.contains("could not be verified")),
+            "{d:?}"
+        );
+    }
+}
+
+#[test]
+fn test_list_allowed_directories_without_path_is_allowed() {
+    let engine = test_engine();
+    let d = engine.evaluate_tool_call(&call("list_allowed_directories", json!({})));
+    assert!(matches!(d, Decision::Allow), "{d:?}");
+}

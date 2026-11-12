@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 (2026-11-13)
+
+Behavior change: tools that 0.2.x allowed can now be blocked or need approval.
+
+* A tool whose name only matches a file-name pattern (`read_*`, `write_*`, `get_*`, `*_file` and similar) is no longer allowed because its path is inside the jail. It must be listed in `always_allow_tools` or `custom_always_allow_tools`, be enabled by a preset, or have the exact name of a standard filesystem tool (`read_text_file`, `read_media_file` and `list_directory_with_sizes` were added to that list). The path is still checked against the jail first. An unknown tool that does not modify is blocked, an unknown tool that modifies needs operator approval (denied with `--no-prompt`). To keep using such a tool, add it to `always_allow_tools` or `custom_always_allow_tools`.
+* A file tool called without arguments, with `{}` or with `null` is blocked ("Path argument could not be verified for file tool") unless it is listed in `non_file_tools`. A tool such as `get-env` that is allowed by name but takes no path now needs `non_file_tools`. `list_allowed_directories`, `list_tables`, `show_schema` and `read_graph` are exempt.
+* CI: a release now requires the `cargo audit` job to pass.
+* CI: the Intel macOS binary is executed on the ARM runner under Rosetta (`--version`). Before, its smoke test was skipped.
+* `moat.toml`: the header and the `read_only` comment no longer overstate what moat does.
+* The README demo output now comes from a real run of `scripts/demo.py`. The paragraph, the recording text and the output describe the same three calls.
+* `docs/security-model.md` used the key name `allowed_dirs`. The key is `allowed_paths`.
+
 ## 0.2.3 (2026-11-12)
 
 No change to how moat behaves.

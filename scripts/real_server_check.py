@@ -155,7 +155,7 @@ def everything_server(work: Path) -> None:
     print("== reference server (server-everything)")
     config = work / "everything.toml"
     config.write_text('always_allow_tools = ["echo", "get-env", "get-sum", "get-tiny-image"]\n'
-                      'non_file_tools = ["get-sum", "get-tiny-image"]\n')
+                      'non_file_tools = ["get-env", "get-sum", "get-tiny-image"]\n')
     env = {**os.environ, "OPENAI_API_KEY": "abcdefgh12345678", "DB_PASSWORD": "hunter2hunter2",
            "GROQ_KEY": "gsk_A1b2C3d4E5f6G7h8I9j0K1l2", "GITHUB_TOKEN": "ghp_" + "A" * 36}
     calls = [("echo", "echo", {"message": "hello"}), ("sum", "get-sum", {"a": 2, "b": 3}), ("env", "get-env", {}),

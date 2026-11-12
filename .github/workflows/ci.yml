@@ -100,7 +100,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.target }}
-    needs: [ test, real-server ]
+    needs: [ test, real-server, cargo-audit ]
     # Tags build the release. A manual run (workflow_dispatch) builds the same archives as a dry run
     # (no release is created for it).
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
@@ -150,7 +150,7 @@ jobs:
           esac
 
       - name: Smoke test binary
-        # The x86_64 macOS binary is cross-built on an arm64 runner and is not run here.
+        # The x86_64 macOS binary is cross-built on an arm64 runner. It is run in the next step.
         if: matrix.target != 'x86_64-apple-darwin'
         shell: bash
         run: |
@@ -158,6 +158,15 @@ jobs:
           [ -f "$bin.exe" ] && bin="$bin.exe"
           "$bin" --version
           "$bin" --help > /dev/null
+
+      - name: Smoke test x86_64 macOS binary under Rosetta
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          softwareupdate --install-rosetta --agree-to-license || true
+          bin="target/${{ matrix.target }}/release/moat"
+          arch -x86_64 "$bin" --version
+          arch -x86_64 "$bin" --help > /dev/null
 
       - name: Package Linux / macOS archive
         if: matrix.os != 'windows-latest'
@@ -184,7 +193,7 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    needs: build
+    needs: [ build, cargo-audit ]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
@@ -202,6 +211,7 @@ jobs:
           awk -v v="$version" 'index($0, "## " v " ") == 1 {f=1; next} /^## / {if (f) exit} f' CHANGELOG.md > release-notes.md
           cat release-notes.md
           if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then test -s release-notes.md; fi
+          printf '\n### Install\n\n```bash\ncargo install --locked mcp-moat --version %s\n```\n\nBinaries for Linux, macOS and Windows are attached below. Check them against `SHA256SUMS`.\n' "$version" >> release-notes.md
 
       - name: Download archives
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

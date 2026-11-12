@@ -137,11 +137,7 @@ fn inv1_every_outside_value_is_blocked_for_standard_tools() {
 #[test]
 fn inv1_in_jail_paths_are_not_blocked() {
     let e = engine();
-    for good in [
-        jp("a.txt"),
-        jp("sub/b.txt"),
-        jp("sub/../c.txt").replace("/sub/..", ""),
-    ] {
+    for good in [jp("a.txt"), jp("sub/b.txt"), jp("c.txt")] {
         let d = e.evaluate_tool_call(&call("read_file", json!({ "path": good })));
         assert!(is_allow(&d), "{good} gave {d:?}");
     }
@@ -246,7 +242,7 @@ fn inv1_resource_reads_are_jailed() {
     ));
     assert!(is_block(&e.evaluate_resource_read("http://example.com/x")));
     assert!(is_allow(
-        &e.evaluate_resource_read(&format!("file://{}", jp("a.txt")))
+        &e.evaluate_resource_read(&common::file_uri(&jp("a.txt")))
     ));
 }
 
@@ -298,7 +294,7 @@ fn inv1_http_urls_are_not_paths_but_file_urls_and_paths_are() {
     // A file URL inside the jail is a jail-checked local path.
     let d = e.evaluate_tool_call(&call(
         "fetch",
-        json!({"url": format!("file://{}", jp("a.txt"))}),
+        json!({"url": common::file_uri(&jp("a.txt"))}),
     ));
     assert!(is_allow(&d), "{d:?}");
     // The URL exemption applies to URL keys only: an http URL in a path key is rejected.

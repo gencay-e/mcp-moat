@@ -10,6 +10,12 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 use mcp_moat_core::{AuditLevel, PolicyConfig, PolicyEngine};
 use mcp_moat_proxy::ProxyServer;
 
+/// Canonicalizes a path and drops the Windows verbatim `\\?\` prefix, which the policy rejects.
+fn plain_canonical(p: &std::path::Path) -> std::path::PathBuf {
+    let c = p.canonicalize().unwrap();
+    std::path::PathBuf::from(c.to_string_lossy().trim_start_matches(r"\\?\"))
+}
+
 /// Sends `lines`, then collects replies until `expected` arrived or 3 seconds passed.
 async fn session(
     config: PolicyConfig,
@@ -188,7 +194,7 @@ async fn standard_methods_and_responses_are_unaffected() {
 async fn audit_failure_answers_requests_instead_of_dropping_them() {
     let jail = temp("audit-fail-jail");
     std::fs::create_dir_all(&jail).unwrap();
-    let jail = jail.canonicalize().unwrap();
+    let jail = plain_canonical(&jail);
     let witness = jail.join("witness.txt");
     let _ = std::fs::remove_file(&witness);
     let bad_audit = temp("audit-fail-dir");
@@ -197,6 +203,14 @@ async fn audit_failure_answers_requests_instead_of_dropping_them() {
     let mut config = PolicyConfig::default();
     config.allowed_paths = vec![jail.clone()];
     config.always_allow_tools.push("echo".to_string());
+    let resource_uri = {
+        let p = jail.join("a.txt").to_string_lossy().replace('\\', "/");
+        if p.starts_with('/') {
+            format!("file://{p}")
+        } else {
+            format!("file:///{p}")
+        }
+    };
     let replies = session(
         config,
         Some(bad_audit.clone()),
@@ -206,7 +220,7 @@ async fn audit_failure_answers_requests_instead_of_dropping_them() {
             json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
             json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
             json!({"jsonrpc": "2.0", "id": 4, "method": "resources/read",
-                "params": {"uri": format!("file://{}", jail.join("a.txt").display())}}),
+                "params": {"uri": resource_uri}}),
             // notifications get no reply
             json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
         ],

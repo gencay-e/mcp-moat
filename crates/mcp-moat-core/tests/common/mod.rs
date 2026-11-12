@@ -9,6 +9,17 @@ use mcp_moat_core::PolicyConfig;
 use serde_json::{json, Value};
 use std::path::Path;
 
+/// Builds a file URI from a native path: `file:///C:/x` for drive paths, `file:///tmp/x` for
+/// absolute Unix paths.
+pub fn file_uri(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Auth {
     /// Not in any list, not a preset tool, not a standard filesystem tool name.

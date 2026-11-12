@@ -1362,12 +1362,16 @@ async fn test_monitor_mode_stderr_never_contains_request_strings() {
 
     let moat = get_moat_bin();
     let mock_server = get_mock_server_bin();
-    let dir = std::env::temp_dir().join(format!("moat_monitor_log_{}", std::process::id()));
+    // The temp dir is canonicalized: on Windows it can be an 8.3 short name (RUNNER~1), which the
+    // policy rejects on purpose, and a `\\?\` prefix is dropped for the same reason.
+    let temp = std::env::temp_dir().canonicalize().unwrap();
+    let temp = PathBuf::from(temp.to_string_lossy().trim_start_matches(r"\\?\"));
+    let dir = temp.join(format!("moat_monitor_log_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     // A real, existing directory next to the jail (not inside it). A Unix-style "/etc/..." path is
     // not absolute on Windows and resolves to a missing parent there, which is a different
     // (I/O) category, so the out-of-jail path is built from the platform temp dir instead.
-    let outside = std::env::temp_dir().join(format!("moat_monitor_out_{}", std::process::id()));
+    let outside = temp.join(format!("moat_monitor_out_{}", std::process::id()));
     std::fs::create_dir_all(&outside).unwrap();
     let outside_file = outside.join(format!("{MARKER}.txt"));
     let outside_file_str = outside_file.to_str().unwrap().to_string();

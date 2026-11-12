@@ -109,6 +109,12 @@ async fn no_prompt_never_forwards_a_call_that_needs_approval() {
     let _ = std::fs::remove_file(&witness);
 }
 
+/// Canonicalizes a path and drops the Windows verbatim `\\?\` prefix, which the policy rejects.
+fn plain_canonical(p: &std::path::Path) -> std::path::PathBuf {
+    let c = p.canonicalize().unwrap();
+    std::path::PathBuf::from(c.to_string_lossy().trim_start_matches(r"\\?\"))
+}
+
 /// The decision matrix of crates/mcp-moat-core/tests/invariants.rs through the proxy without a
 /// console: a call the rule allows reaches the server, a call it blocks is blocked, and a call
 /// that needs approval is denied with the `--no-prompt` message and never reaches the server.
@@ -119,7 +125,7 @@ async fn decision_matrix_without_console() {
 
     let jail = std::env::temp_dir().join(format!("mcp-moat-matrix-jail-{}", std::process::id()));
     std::fs::create_dir_all(jail.join(".git")).unwrap();
-    let jail = jail.canonicalize().unwrap();
+    let jail = plain_canonical(&jail);
 
     // one proxy session per policy; the cases of a policy differ in path and command only
     let mut groups: std::collections::BTreeMap<String, Vec<matrix::Case>> = Default::default();

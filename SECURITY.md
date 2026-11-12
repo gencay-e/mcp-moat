@@ -12,7 +12,7 @@ A policy proxy between an MCP client and an MCP server on stdio. It reduces the 
 
 ## Known limits
 
-These are known and are not fixed in 0.2.0.
+These are known and are not fixed in the current release.
 
 **Command filter**
 * `blocked_commands` is tokenized before matching. Whitespace is collapsed, path prefixes are resolved to the program name (`/bin/rm` becomes `rm`) and combined short flags are compared as sets. `rm  -rf /`, `rm -r -f /`, `/bin/rm -fr /` and `sudo rm -rf /` match the default entries, while `rm -rf /tmp/build` does not and goes to the operator prompt.

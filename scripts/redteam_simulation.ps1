@@ -88,7 +88,7 @@ $INIT_REQ = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVe
 # ==============================================================================
 # 1. UNC-COERCION ATTACKS
 # ==============================================================================
-Write-Host "`n>>> [SECTION 1] UNC-Coercion-Angriffe <<<" -ForegroundColor Magenta
+Write-Host "`n>>> [SECTION 1] UNC coercion attacks <<<" -ForegroundColor Magenta
 
 # 1.1 Classic UNC backslashes
 Run-SessionTest -TestId "UNC-01" -Category "1. UNC-Coercion" `
@@ -161,7 +161,7 @@ Run-SessionTest -TestId "UNC-04" -Category "1. UNC-Coercion" `
 # ==============================================================================
 # 2. NT OBJECT MANAGER NAMESPACE BYPASS
 # ==============================================================================
-Write-Host "`n>>> [SECTION 2] NT Object Manager Namespace-Bypass <<<" -ForegroundColor Magenta
+Write-Host "`n>>> [SECTION 2] NT object manager namespace bypass <<<" -ForegroundColor Magenta
 
 # 2.1 Classic Win32 NT Namespace (\??\C:\Windows\System32\calc.exe)
 Run-SessionTest -TestId "NT-01" -Category "2. NT-Namespace" `
@@ -602,7 +602,7 @@ Run-SessionTest -TestId "RO-04" -Category "6. Read-Only" `
 # ==============================================================================
 # 7. CORRUPT / MALFORMED PARAMETERS & PROTOCOL VIOLATIONS (-32602, -32600, -32700)
 # ==============================================================================
-Write-Host "`n>>> [SECTION 7] Unlesbare/korrupte Parameter & Protokollfehler <<<" -ForegroundColor Magenta
+Write-Host "`n>>> [SECTION 7] Malformed parameters and protocol errors <<<" -ForegroundColor Magenta
 
 # 7.1 Missing 'name' parameter in tools/call (-32602 INVALID_PARAMS)
 Run-SessionTest -TestId "MAL-01" -Category "7. Malformed-Params" `

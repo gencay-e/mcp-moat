@@ -7,13 +7,15 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/mcp-moat-proxy"
 keywords.workspace = true
 categories.workspace = true
 autotests = false
 
 [dependencies]
-mcp-moat-core = { path = "../mcp-moat-core", version = "0.2.2" }
-mcp-moat-tty = { path = "../mcp-moat-tty", version = "0.2.2" }
+mcp-moat-core = { path = "../mcp-moat-core", version = "0.2.3" }
+mcp-moat-tty = { path = "../mcp-moat-tty", version = "0.2.3" }
 tokio.workspace = true
 tokio-util.workspace = true
 serde.workspace = true

@@ -679,7 +679,7 @@ LS0tLS1BRUdJTiBQUklWQVRFIEtFWS0tLS0t
     fn test_dlp_base64_heuristic_is_off_by_default() {
         let dlp = DlpEngine::new();
         for sample in [
-            "/home/gencay/Projects/MyApp2/src/components/Button.tsx",
+            "/home/user/Projects/MyApp2/src/components/Button.tsx",
             r#"{"type":"image","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="}"#,
             r#"{"type":"audio","data":"UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA1"}"#,
             r#""integrity": "sha512-Xj2Kp9QmVb7Rr0uLWnT3yZ8fH1cA4sE6dG5hJ2kL0mN9oP8qR7sT6uV5wX4yZ3aB2cD1eF0gH==""#,

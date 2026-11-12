@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-moat"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-moat-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "aho-corasick",
  "regex",
@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-moat-proxy"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "mcp-moat-core",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-moat-tty"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "crossterm",
  "similar",

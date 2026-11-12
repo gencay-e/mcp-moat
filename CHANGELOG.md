@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.2.2 (2026-11-12)
+## 0.2.3 (2026-11-12)
+
+No change to how moat behaves.
+
+* The README now states that audit write failures fail closed: the call is not forwarded.
+* The crate pages on crates.io link the homepage and the documentation.
+* Comments and output of the red-team script are in English only.
+
+## 0.2.2 (2026-11-11)
 
 * With `--no-prompt`, a call that needs approval was blocked with "Action was rejected by operator in prompt", although nobody was asked. The block message now says: "Approval required (protected file or unlisted tool), but --no-prompt is set, so the call was denied".
 * If no terminal is available for the approval prompt (or it cannot be read), the block message now says so instead of blaming the operator.

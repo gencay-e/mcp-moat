@@ -4,6 +4,3 @@
 .env
 .idea
 .vscode
-
-# Claude Code: agents + settings.json versionieren, lokale Overrides nicht
-.claude/settings.local.json

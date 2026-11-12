@@ -7,6 +7,8 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://github.com/gencay-e/mcp-moat#readme"
 keywords.workspace = true
 categories.workspace = true
 
@@ -20,9 +22,9 @@ default = []
 experimental-sse = []
 
 [dependencies]
-mcp-moat-core = { path = "../mcp-moat-core", version = "0.2.2" }
-mcp-moat-proxy = { path = "../mcp-moat-proxy", version = "0.2.2" }
-mcp-moat-tty = { path = "../mcp-moat-tty", version = "0.2.2" }
+mcp-moat-core = { path = "../mcp-moat-core", version = "0.2.3" }
+mcp-moat-proxy = { path = "../mcp-moat-proxy", version = "0.2.3" }
+mcp-moat-tty = { path = "../mcp-moat-tty", version = "0.2.3" }
 clap.workspace = true
 clap_complete.workspace = true
 tokio.workspace = true

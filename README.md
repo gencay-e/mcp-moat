@@ -8,7 +8,7 @@ A policy proxy for MCP servers, written in Rust. `moat` sits between an MCP clie
 
 <img alt="moat sits between an MCP client such as Claude Desktop, Claude Code or Cursor and an MCP server, talks stdio to both, checks paths and commands, masks secrets, asks the operator on the terminal and writes a hash-chained audit log" src="https://raw.githubusercontent.com/gencay-e/mcp-moat/main/docs/images/moat-flow.svg" width="900">
 
-`moat` filters stdio traffic and prompts the operator, but it does not sandbox the server process itself. Read [SECURITY.md](https://github.com/gencay-e/mcp-moat/blob/main/SECURITY.md) for what it does not protect against, and [CHANGELOG.md](https://github.com/gencay-e/mcp-moat/blob/main/CHANGELOG.md) for the current release (`0.2.2`).
+`moat` filters stdio traffic and prompts the operator, but it does not sandbox the server process itself. Read [SECURITY.md](https://github.com/gencay-e/mcp-moat/blob/main/SECURITY.md) for what it does not protect against, and [CHANGELOG.md](https://github.com/gencay-e/mcp-moat/blob/main/CHANGELOG.md) for the current release (`0.2.3`).
 
 ---
 
@@ -18,9 +18,7 @@ A policy proxy for MCP servers, written in Rust. `moat` sits between an MCP clie
 
 <img alt="Terminal recording: moat masks a key in project/notes.md, blocks a read of ../.ssh/id_ed25519, denies a write to project/.env because --no-prompt is set, and moat audit verify reports the hash chain as intact" src="https://raw.githubusercontent.com/gencay-e/mcp-moat/main/docs/images/moat-demo.gif" width="900">
 
-A real run of moat 0.2.2 in front of the filesystem server. The verdict lines are shortened from moat's responses; `scripts/demo.py` drives the run and checks each line against the real output.
-
-A real run in front of `@modelcontextprotocol/server-filesystem`, allowed folder `/srv/demo/project`. The agent read `notes.md` (which holds a token), then tried `../private/keys.txt` twice:
+A real run of moat in front of `@modelcontextprotocol/server-filesystem`, allowed folder `/srv/demo/project`. The verdict lines are shortened from moat's responses; `scripts/demo.py` drives the run and checks each line against the real output. The agent read `notes.md` (which holds a token), then tried `../private/keys.txt` twice:
 
 ```text
 $ moat audit query audit.jsonl --violations-only
@@ -77,7 +75,7 @@ What this detects: changing, reordering or deleting a line in the middle of a se
 
 What this does not detect: cutting lines off the end, deleting a whole session, deleting the file, or rebuilding a log from scratch. The hash is not keyed and there is no external anchor. Do not treat the log as tamper-proof evidence. Previews in the log are passed through the secret masking.
 
-Audit write errors are currently ignored and do not stop the proxy.
+If the audit log cannot be written, the call is not forwarded (fail closed).
 
 Other commands: `moat audit query <file> --violations-only`, `moat audit query <file> --tool <name>`, `moat audit tail <file> -f`.
 
@@ -304,7 +302,7 @@ Limits:
 
 ## Tested against real MCP servers
 
-`scripts/real_server_check.py` starts mcp-moat in front of three real servers and checks 56 cases. It needs Node.js, Python and git, and runs in CI on Linux.
+`scripts/real_server_check.py` starts mcp-moat in front of three real servers and checks 58 cases (56 on Windows, where the two symlink cases are skipped). It needs Node.js, Python and git, and runs in CI on Linux.
 
 * `@modelcontextprotocol/server-filesystem`: reads inside and outside the jail, `..`, symlinks to the outside, protected files, read-only mode, secret masking, audit chain.
 * `mcp-server-git`: this server does not restrict itself. It reads any repository you name. mcp-moat keeps it inside the allowed folder, including relative file lists such as `files: ["src/main.rs"]`, which are checked against `repo_path`.

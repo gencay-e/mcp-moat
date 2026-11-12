@@ -205,7 +205,7 @@ impl ProxyServer {
 
         let client_out_writer = Arc::new(Mutex::new(client_out));
 
-        // Child Stdin Writer Task with Ping-Bypass (Priority vs Normal queue)
+        // Child stdin writer with a priority lane so keepalive pings are not stuck behind slow tool calls.
         let (priority_tx, mut priority_rx) = tokio::sync::mpsc::channel::<String>(100);
         let (normal_tx, mut normal_rx) = tokio::sync::mpsc::channel::<String>(1000);
 
@@ -507,7 +507,7 @@ impl ProxyServer {
                             continue;
                         }
 
-                        // Ping-Bypass: Keepalive-Pings ("ping") overtake waiting tool-calls via priority bypass
+                        // Keepalive pings ("ping") use the priority lane and overtake queued tool calls.
                         if req.method == "ping" {
                             let now = std::time::Instant::now();
                             if now.duration_since(ping_window_start) >= Duration::from_secs(1) {

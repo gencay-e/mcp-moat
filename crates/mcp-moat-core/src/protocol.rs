@@ -82,7 +82,7 @@ impl JsonRpcResponse {
                 {
                     "type": "text",
                     "text": format!(
-                        "[MCP-MOAT: IMMUTABLE_POLICY_VIOLATION]\nAction blocked: {}\n\nINSTRUCTION FOR AGENT:\n1. This restriction is enforced by an external OS-level security proxy.\n2. DO NOT retry with alternative paths, encodings, or shell scripts.\n3. ABORT this subtask immediately and report the restriction to the user.",
+                        "[MCP-MOAT: IMMUTABLE_POLICY_VIOLATION]\nAction blocked: {}\n\nINSTRUCTION FOR AGENT:\n1. This restriction is enforced by an external MCP protocol policy proxy.\n2. DO NOT retry with alternative paths, encodings, or shell scripts.\n3. ABORT this subtask immediately and report the restriction to the user.",
                         reason.into()
                     )
                 }

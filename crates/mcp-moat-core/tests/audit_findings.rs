@@ -110,10 +110,10 @@ fn test_f07_move_file_source_and_destination_checked() {
     match d {
         Decision::Block(msg) => {
             #[cfg(windows)]
-            assert!(msg.contains("prohibited") || msg.contains("sandbox root"));
+            assert!(msg.contains("prohibited") || msg.contains("allowed root"));
             #[cfg(not(windows))]
             assert!(
-                msg.contains("outside boundary") || msg.contains("sandbox root"),
+                msg.contains("outside boundary") || msg.contains("allowed root"),
                 "{}",
                 msg
             );

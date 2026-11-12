@@ -1,8 +1,6 @@
 pub mod engine;
-pub mod sse;
 
 pub use engine::ProxyServer;
-pub use sse::{SseBridgeServer, SseProxyServer};
 
 /// Why an action that needed operator approval was denied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,14 +20,6 @@ impl DenyCause {
             DenyCause::OperatorRejected => "Action was rejected by operator in prompt",
             DenyCause::NoPrompt => "Approval required (protected file or unlisted tool), but --no-prompt is set, so the call was denied",
             DenyCause::NoTerminal => "Approval required, but no terminal was available for the approval prompt, so the call was denied",
-        }
-    }
-
-    /// Message for the JSON-RPC error used for non-tool requests.
-    pub(crate) fn rpc_message(self) -> String {
-        match self {
-            DenyCause::OperatorRejected => "[moat] Action rejected by operator".to_string(),
-            other => format!("[moat] {}", other.tool_reason()),
         }
     }
 }
@@ -146,16 +136,5 @@ mod deny_cause_tests {
         assert!(!DenyCause::NoTerminal
             .tool_reason()
             .contains("rejected by operator"));
-    }
-
-    #[test]
-    fn rpc_message_keeps_old_text_for_operator_rejection() {
-        assert_eq!(
-            DenyCause::OperatorRejected.rpc_message(),
-            "[moat] Action rejected by operator"
-        );
-        assert!(DenyCause::NoPrompt
-            .rpc_message()
-            .starts_with("[moat] Approval required"));
     }
 }

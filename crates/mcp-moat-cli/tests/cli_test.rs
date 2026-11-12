@@ -815,37 +815,6 @@ async fn test_cli_wrap_preset_git_and_invalid_preset() {
     assert!(stdout.contains("--preset"));
 }
 
-#[cfg(feature = "experimental-sse")]
-#[tokio::test]
-async fn test_cli_sse_proxy_and_bridge_help() {
-    let moat = get_moat_bin();
-
-    // 1. SseProxy help
-    let sse_proxy_help = Command::new(moat)
-        .args(["sse-proxy", "--help"])
-        .output()
-        .await
-        .expect("Failed to execute moat sse-proxy --help");
-
-    assert!(sse_proxy_help.status.success());
-    let stdout = String::from_utf8_lossy(&sse_proxy_help.stdout);
-    assert!(stdout.contains("--target"));
-    assert!(stdout.contains("--listen"));
-    assert!(stdout.contains("--preset"));
-
-    // 2. SseBridge help
-    let sse_bridge_help = Command::new(moat)
-        .args(["sse-bridge", "--help"])
-        .output()
-        .await
-        .expect("Failed to execute moat sse-bridge --help");
-
-    assert!(sse_bridge_help.status.success());
-    let stdout = String::from_utf8_lossy(&sse_bridge_help.stdout);
-    assert!(stdout.contains("--target"));
-    assert!(stdout.contains("--preset"));
-}
-
 #[tokio::test]
 async fn test_cli_wrap_child_exit_code_propagation() {
     let moat = get_moat_bin();
@@ -1003,20 +972,15 @@ async fn test_cli_codegen_from_json_and_spawn_mock_server() {
     let _ = std::fs::remove_file(&json_path);
 }
 
-#[cfg(not(feature = "experimental-sse"))]
 #[test]
-fn test_sse_commands_are_not_available_by_default() {
+fn test_sse_commands_do_not_exist() {
     let moat = get_moat_bin();
     for cmd in ["sse-proxy", "sse-bridge"] {
         let out = std::process::Command::new(moat)
             .args([cmd, "--help"])
             .output()
             .expect("Failed to run moat");
-        assert!(
-            !out.status.success(),
-            "{} must not exist without the feature",
-            cmd
-        );
+        assert!(!out.status.success(), "{} must not exist", cmd);
     }
 }
 
@@ -1257,4 +1221,230 @@ async fn test_cli_wrap_protects_custom_config_path() {
             || lower.contains("immutable_policy_violation"),
         "unexpected denial message: {text}"
     );
+}
+
+/// With `RUST_LOG=trace` no log line may carry request arguments, server responses, malformed
+/// input or the environment: the log has method, id, byte length and decision only.
+#[tokio::test]
+async fn test_trace_logging_never_contains_payloads_or_secrets() {
+    const AWS: &str = "AKIAIOSFODNN7EXAMPLE";
+    const GITHUB: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    const API_KEY: &str = "sk-1234567890abcdef1234567890abcdef"; // also leaked by the mock server
+    const ENV_SECRET: &str = "env-secret-value-7f3a9c1d5e";
+    const EXTRA_ARG: &str = "--unused-arg-secret-4b8e2a";
+
+    let moat = get_moat_bin();
+    let mock_server = get_mock_server_bin();
+    let dir = std::env::temp_dir().join(format!("moat_trace_log_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("moat.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "allowed_paths = ['{}']\nalways_allow_tools = ['echo']\n",
+            dir.display()
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(moat)
+        .args([
+            "wrap",
+            "--no-prompt",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--",
+            mock_server.to_str().unwrap(),
+            "--leak-secret",
+            EXTRA_ARG,
+        ])
+        .env("RUST_LOG", "trace")
+        .env("MOAT_TEST_ENV_SECRET", ENV_SECRET)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn moat wrap");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut reader = BufReader::new(stdout).lines();
+    let stderr_task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf).await;
+        String::from_utf8_lossy(&buf).to_string()
+    });
+
+    let requests = vec![
+        // allowed: argument and response both carry secrets
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"message": format!("{AWS} {GITHUB}")}}})
+        .to_string(),
+        // blocked: path outside the jail, secrets in the arguments
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": "/etc/moat-test", "content": GITHUB}}})
+        .to_string(),
+        // needs approval, denied by --no-prompt
+        json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "bash", "arguments": {"command": format!("echo {AWS}")}}})
+        .to_string(),
+        // wrong jsonrpc version and a secret in the version field
+        json!({"jsonrpc": GITHUB, "id": 4, "method": "tools/list"}).to_string(),
+        // method that is not a plain token
+        json!({"jsonrpc": "2.0", "id": 5, "method": format!("x/{AWS}/{GITHUB}/long-long-long-long-long-long-long-long-long")}).to_string(),
+        // malformed JSON with a secret inside
+        format!("{{\"jsonrpc\": \"2.0\", \"id\": 6, \"note\": \"{AWS}\""),
+        // valid JSON, invalid request
+        format!("{{\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": 5, \"note\": \"{GITHUB}\"}}"),
+        // batch with a secret
+        format!("[{{\"jsonrpc\": \"2.0\", \"id\": 8, \"method\": \"ping\", \"note\": \"{AWS}\"}}]"),
+        // resource read outside the jail
+        json!({"jsonrpc": "2.0", "id": 9, "method": "resources/read",
+            "params": {"uri": format!("file:///etc/{GITHUB}")}})
+        .to_string(),
+    ];
+    for r in &requests {
+        stdin.write_all(format!("{r}\n").as_bytes()).await.unwrap();
+    }
+    stdin.flush().await.unwrap();
+
+    // every request except possibly the notification-free ones gets exactly one response
+    let mut seen = 0;
+    while seen < requests.len() {
+        let line = tokio::time::timeout(Duration::from_secs(10), reader.next_line())
+            .await
+            .expect("timeout waiting for a response")
+            .unwrap()
+            .expect("unexpected EOF");
+        let out: Value = serde_json::from_str(&line).unwrap();
+        if out["id"] == json!(1) {
+            // the allowed call: the secrets in the response are masked for the client
+            for secret in [AWS, GITHUB, API_KEY] {
+                assert!(!line.contains(secret), "{line}");
+            }
+        }
+        seen += 1;
+    }
+
+    drop(stdin);
+    let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+    let log = stderr_task.await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // the trace level is really on: the log is not empty and carries the safe fields
+    assert!(
+        log.contains("Inbound request") && log.contains("method=\"tools/call\""),
+        "trace logging did not run, log was:\n{log}"
+    );
+    for secret in [
+        AWS,
+        GITHUB,
+        API_KEY,
+        ENV_SECRET,
+        EXTRA_ARG,
+        "MOAT_TEST_ENV_SECRET",
+    ] {
+        assert!(!log.contains(secret), "log contains {secret:?}:\n{log}");
+    }
+    assert!(
+        !log.contains("/etc/moat-test"),
+        "log contains an argument value:\n{log}"
+    );
+}
+
+/// Same as the trace test, with `--monitor`: the diagnostics for simulated blocks name the tool
+/// and a fixed category, never the path or the URI that the client sent.
+#[tokio::test]
+async fn test_monitor_mode_stderr_never_contains_request_strings() {
+    const MARKER: &str = "uniq-marker-91c4e7";
+
+    let moat = get_moat_bin();
+    let mock_server = get_mock_server_bin();
+    let dir = std::env::temp_dir().join(format!("moat_monitor_log_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("moat.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "allowed_paths = ['{}']\nalways_allow_tools = ['echo']\n",
+            dir.display()
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(moat)
+        .args([
+            "wrap",
+            "--no-prompt",
+            "--monitor",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--",
+            mock_server.to_str().unwrap(),
+        ])
+        .env("RUST_LOG", "trace")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn moat wrap");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut reader = BufReader::new(stdout).lines();
+    let stderr_task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf).await;
+        String::from_utf8_lossy(&buf).to_string()
+    });
+
+    let requests = vec![
+        // path outside the jail, in the path and in the tool name
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": format!("/etc/{MARKER}/x"), "content": "c"}}})
+        .to_string(),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": format!("evil\n{MARKER}\u{1b}[2J"), "arguments": {"path": format!("/etc/{MARKER}")}}})
+        .to_string(),
+        // resource outside the jail
+        json!({"jsonrpc": "2.0", "id": 3, "method": "resources/read",
+            "params": {"uri": format!("file:///etc/{MARKER}")}})
+        .to_string(),
+        // unknown method (a short plain method name is logged as a token at debug level)
+        json!({"jsonrpc": "2.0", "id": 4, "method": "x/unknown"}).to_string(),
+        // command that needs approval
+        json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {"name": "bash", "arguments": {"command": format!("echo {MARKER}")}}})
+        .to_string(),
+    ];
+    for r in &requests {
+        stdin.write_all(format!("{r}\n").as_bytes()).await.unwrap();
+    }
+    stdin.flush().await.unwrap();
+    for _ in 0..requests.len() {
+        tokio::time::timeout(Duration::from_secs(10), reader.next_line())
+            .await
+            .expect("timeout waiting for a response")
+            .unwrap()
+            .expect("unexpected EOF");
+    }
+    drop(stdin);
+    let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+    let log = stderr_task.await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        log.contains("[mcp-moat:MONITOR] Simulated BLOCK"),
+        "monitor diagnostics did not run, log was:\n{log}"
+    );
+    assert!(
+        log.contains("(path outside allowed folder)") && log.contains("(method not allowed)"),
+        "expected fixed categories, log was:\n{log}"
+    );
+    assert!(!log.contains(MARKER), "log contains the marker:\n{log}");
+    assert!(!log.contains('\u{1b}'), "log contains a raw escape:\n{log}");
 }

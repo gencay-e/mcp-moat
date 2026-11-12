@@ -55,9 +55,15 @@ pub struct PolicyConfig {
     pub non_file_tools: Vec<String>,
 
     /// Argument keys that never contain file paths, although their name suggests it
-    /// (for example `target: "HEAD~1"` of a git diff). Their values are not checked as paths.
+    /// (for example `target: "HEAD~1"` of a git diff). Their values are not checked as paths, for
+    /// every tool. This is an operator decision; presets ignore keys for their own tools only.
     #[serde(default)]
     pub ignore_path_keys: Vec<String>,
+
+    /// Argument keys that are not paths for one tool only (tool name -> keys). Filled by presets
+    /// for the tools of the preset. Not read from `moat.toml`.
+    #[serde(skip)]
+    pub tool_ignore_path_keys: HashMap<String, Vec<String>>,
 
     /// Custom argument keys containing commands to execute
     #[serde(default)]
@@ -74,6 +80,11 @@ pub struct PolicyConfig {
     /// Optional context-window budget (in bytes) per tool/resource output text block
     #[serde(default)]
     pub max_output_bytes: Option<usize>,
+
+    /// Extra JSON-RPC method names (exact match) forwarded in addition to the standard MCP
+    /// client-to-server methods. Any other method is refused.
+    #[serde(default)]
+    pub allowed_methods: Vec<String>,
 
     /// Tools hidden from `tools/list` discovery and blocked on `tools/call`
     #[serde(default)]
@@ -122,6 +133,10 @@ pub struct PresetConfig {
 
     #[serde(default)]
     pub custom_path_keys: Option<Vec<String>>,
+
+    /// Tools of this preset that take no path although their name looks like a file tool.
+    #[serde(default)]
+    pub non_file_tools: Option<Vec<String>>,
 
     #[serde(default)]
     pub ignore_path_keys: Option<Vec<String>>,
@@ -199,10 +214,12 @@ impl Default for PolicyConfig {
             custom_path_keys: Vec::new(),
             non_file_tools: Vec::new(),
             ignore_path_keys: Vec::new(),
+            tool_ignore_path_keys: HashMap::new(),
             custom_command_keys: Vec::new(),
             blocked_commands_regex: Vec::new(),
             compact_schemas: false,
             max_output_bytes: None,
+            allowed_methods: Vec::new(),
             hidden_tools: Vec::new(),
             protected_files: Vec::new(),
             dlp_base64_heuristic: false,
@@ -237,6 +254,7 @@ impl PolicyConfig {
                 ]),
                 custom_always_allow_tools: None,
                 custom_path_keys: None,
+                non_file_tools: None,
                 ignore_path_keys: None,
                 custom_command_keys: None,
                 compact_schemas: None,
@@ -263,6 +281,12 @@ impl PolicyConfig {
                     "git_branch".to_string(),
                     "git_diff_unstaged".to_string(),
                     "git_diff_staged".to_string(),
+                    // Local, recoverable operations. git_push, git_reset and git_merge are
+                    // classified as modifying but not authorized: they ask the operator.
+                    "git_add".to_string(),
+                    "git_commit".to_string(),
+                    "git_create_branch".to_string(),
+                    "git_checkout".to_string(),
                 ]),
                 custom_modifying_tools: Some(vec![
                     "git_commit".to_string(),
@@ -275,6 +299,7 @@ impl PolicyConfig {
                 ]),
                 custom_always_allow_tools: None,
                 custom_path_keys: None,
+                non_file_tools: None,
                 // Values of these keys are revisions, branch names or messages, not paths.
                 ignore_path_keys: Some(vec![
                     "target".to_string(),
@@ -310,6 +335,12 @@ impl PolicyConfig {
                 ]),
                 custom_always_allow_tools: None,
                 custom_path_keys: None,
+                non_file_tools: Some(vec![
+                    "fetch".to_string(),
+                    "http_get".to_string(),
+                    "web_search".to_string(),
+                    "read_url".to_string(),
+                ]),
                 ignore_path_keys: None,
                 custom_command_keys: None,
                 compact_schemas: None,
@@ -340,6 +371,16 @@ impl PolicyConfig {
                     "database".to_string(),
                     "db_path".to_string(),
                 ]),
+                non_file_tools: Some(vec![
+                    "read_query".to_string(),
+                    "list_tables".to_string(),
+                    "describe_table".to_string(),
+                    "show_schema".to_string(),
+                    "write_query".to_string(),
+                    "execute_query".to_string(),
+                    "create_table".to_string(),
+                    "drop_table".to_string(),
+                ]),
                 ignore_path_keys: None,
                 custom_command_keys: None,
                 compact_schemas: None,
@@ -366,7 +407,19 @@ impl PolicyConfig {
                 ]),
                 custom_always_allow_tools: None,
                 custom_path_keys: None,
-                ignore_path_keys: None,
+                non_file_tools: Some(vec![
+                    "read_graph".to_string(),
+                    "search_nodes".to_string(),
+                    "open_nodes".to_string(),
+                    "create_entities".to_string(),
+                    "create_relations".to_string(),
+                    "delete_entities".to_string(),
+                    "delete_relations".to_string(),
+                    "add_observations".to_string(),
+                ]),
+                // Relations are {from, to, relationType} with entity names, not paths. Applies
+                // to the tools of this preset only.
+                ignore_path_keys: Some(vec!["from".to_string(), "to".to_string()]),
                 custom_command_keys: None,
                 compact_schemas: None,
                 max_output_bytes: None,
@@ -389,6 +442,19 @@ impl PolicyConfig {
                     name
                 ))
             })?;
+
+        // Tools of this preset: its ignore_path_keys apply to these tools only.
+        let preset_tools: Vec<String> = [
+            &preset.always_allow_tools,
+            &preset.custom_always_allow_tools,
+            &preset.custom_modifying_tools,
+            &preset.non_file_tools,
+        ]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .cloned()
+        .collect();
 
         if let Some(paths) = preset.allowed_paths {
             self.allowed_paths = paths;
@@ -441,10 +507,20 @@ impl PolicyConfig {
                 }
             }
         }
+        if let Some(tools) = preset.non_file_tools {
+            for t in tools {
+                if !self.non_file_tools.contains(&t) {
+                    self.non_file_tools.push(t);
+                }
+            }
+        }
         if let Some(ignore_keys) = preset.ignore_path_keys {
-            for ik in ignore_keys {
-                if !self.ignore_path_keys.contains(&ik) {
-                    self.ignore_path_keys.push(ik);
+            for tool in &preset_tools {
+                let entry = self.tool_ignore_path_keys.entry(tool.clone()).or_default();
+                for ik in &ignore_keys {
+                    if !entry.contains(ik) {
+                        entry.push(ik.clone());
+                    }
                 }
             }
         }
@@ -574,17 +650,14 @@ impl PolicyEngine {
                 .any(|t| t == tool_name)
     }
 
-    /// True if the tool is listed as allowed or its exact name is a known standard file tool.
-    fn is_explicitly_allowed(&self, tool_name: &str) -> bool {
-        self.is_listed_allowed(tool_name) || is_standard_file_tool(tool_name)
-    }
-
     pub fn extract_all_path_arguments(&self, call: &ToolCallParams) -> Vec<String> {
-        extract_all_path_arguments_ignoring(
-            call,
-            &self.config.custom_path_keys,
-            &self.config.ignore_path_keys,
-        )
+        // Global ignore keys (operator decision in moat.toml) plus the keys of a preset, which
+        // apply only to the tools of that preset.
+        let mut ignore = self.config.ignore_path_keys.clone();
+        if let Some(keys) = self.config.tool_ignore_path_keys.get(&call.name) {
+            ignore.extend(keys.iter().cloned());
+        }
+        extract_all_path_arguments_ignoring(call, &self.config.custom_path_keys, &ignore)
     }
 
     pub fn extract_command_argument(&self, call: &ToolCallParams) -> Option<String> {
@@ -603,11 +676,29 @@ impl PolicyEngine {
         }
     }
 
-    /// Evaluates whether an incoming tool call is permitted, requires prompt, or is blocked
+    /// Evaluates whether an incoming tool call is permitted, requires prompt, or is blocked.
+    ///
+    /// Order of checks (the first match wins; the table in docs/security-model.md is the
+    /// reference):
+    /// 1. hidden tool, non-object arguments: Block
+    /// 2. every path-like argument is extracted and checked against the jail and the lexical
+    ///    rules: any failure is Block, whatever the tool name or the other arguments are
+    /// 3. a file tool without any verifiable path: Block
+    /// 4. modifying tool in read-only mode: Block
+    /// 5. a tool that is not authorized and does not modify: Block
+    /// 6. blocked command: Block
+    /// 7. any other command argument: AskOperator
+    /// 8. modifying tool and (protected file, or `require_approval_on_write`, with or without a
+    ///    path, or not authorized): AskOperator
+    /// 9. otherwise Allow
+    ///
+    /// Authorized means: listed in `always_allow_tools` / `custom_always_allow_tools` (presets
+    /// fill these lists) or an exact standard filesystem tool name. Classification as modifying
+    /// (`custom_modifying_tools`, name patterns) never authorizes a call.
     pub fn evaluate_tool_call(&self, call: &ToolCallParams) -> Decision {
         let tool_name = call.name.as_str();
 
-        // 0. Check if tool is explicitly hidden/disabled by policy
+        // 1. Hidden tools and malformed arguments
         if self.is_tool_hidden(tool_name) {
             return Decision::Block(format!(
                 "Tool '{}' is hidden and disabled by policy",
@@ -615,7 +706,6 @@ impl PolicyEngine {
             ));
         }
 
-        // 1. Arguments validation: If arguments exist, they MUST be a JSON object
         if let Some(args) = &call.arguments {
             if !args.is_object() {
                 return Decision::Block(
@@ -624,59 +714,21 @@ impl PolicyEngine {
             }
         }
 
-        // 2. Check dangerous write actions in read-only mode
-        let is_write = self.is_modifying_tool(tool_name);
-        if is_write && self.config.read_only {
-            return Decision::Block(format!(
-                "Read-only policy active: modifying tool '{}' is prohibited",
-                tool_name
-            ));
-        }
-
-        // 3. Shell and command execution checks
-        if let Some(cmd_str) = self.extract_command_argument(call) {
-            for blocked in &self.config.blocked_commands {
-                if command_matches_blocked(&cmd_str, blocked) {
-                    return Decision::Block(format!(
-                        "Prohibited destructive command detected: matches '{}'",
-                        blocked
-                    ));
-                }
-            }
-
-            for re in &self.compiled_blocked_regexes {
-                if re.is_match(&cmd_str) {
-                    return Decision::Block(format!(
-                        "Prohibited destructive command detected: matches pattern '{}'",
-                        re.as_str()
-                    ));
-                }
-            }
-
-            if has_dangerous_shell_metacharacters(&cmd_str) {
-                return Decision::AskOperator {
-                    tool_name: tool_name.to_string(),
-                    target_path: None,
-                    action_summary: format!(
-                        "Command contains dangerous shell metacharacters: {}",
-                        summarize_call(call)
-                    ),
-                };
-            }
-
-            // Shell commands require operator approval by default
-            return Decision::AskOperator {
-                tool_name: tool_name.to_string(),
-                target_path: None,
-                action_summary: summarize_call(call),
-            };
-        }
-
-        // 4. Extract and validate ALL target paths (single paths, arrays, source/destination)
+        // 2. Extract and validate ALL target paths (single paths, arrays, source/destination)
+        // before anything else is decided. Fail-closed: if ANY path is invalid or out-of-jail,
+        // block immediately. This prevents multi-path short-circuit bypasses (valid source +
+        // out-of-jail destination) and prompts for calls that must never reach the operator.
         let extracted_paths = self.extract_all_path_arguments(call);
+        let mut resolved_paths = Vec::new();
+        for path_str in &extracted_paths {
+            match self.validate_path_secure(path_str) {
+                Ok(resolved_path) => resolved_paths.push((resolved_path, path_str.as_str())),
+                Err(err) => return Decision::Block(err.to_string()),
+            }
+        }
 
-        // Fail-closed: If a file/path-based tool has no path that could be extracted (also when it
-        // has no arguments at all), it must NEVER be allowed or prompted automatically!
+        // 3. Fail-closed: a file/path-based tool without a path that could be extracted (also
+        // when it has no arguments at all) is never allowed or prompted automatically.
         if is_file_tool(tool_name)
             && !self.is_non_file_tool(tool_name)
             && extracted_paths.is_empty()
@@ -686,87 +738,96 @@ impl PolicyEngine {
             );
         }
 
-        if !extracted_paths.is_empty() {
-            // Step 1: check every path against the jail and the lexical rules.
-            // Fail-closed: If ANY path is invalid or out-of-jail, block IMMEDIATELY!
-            // This prevents multi-path short-circuit bypasses (e.g. valid source + out-of-jail destination).
-            let mut resolved_paths = Vec::new();
-            for path_str in &extracted_paths {
-                match self.validate_path_secure(path_str) {
-                    Ok(resolved_path) => resolved_paths.push((resolved_path, path_str.as_str())),
-                    Err(err) => return Decision::Block(err.to_string()),
-                }
-            }
-
-            // Step 2: does any resolved path target a protected file or the audit log?
-            if is_write {
-                for (resolved_path, raw_str) in &resolved_paths {
-                    if self.is_protected_target(resolved_path) {
-                        return Decision::AskOperator {
-                            tool_name: tool_name.to_string(),
-                            target_path: Some(resolved_path.clone()),
-                            action_summary: format!(
-                                "Attempted modification of protected configuration/hook: {}",
-                                raw_str
-                            ),
-                        };
-                    }
-                }
-
-                // Step 3: operator approval on write, if configured
-                if self.config.require_approval_on_write {
-                    let first_resolved = resolved_paths.first().map(|(p, _)| p.clone());
-                    return Decision::AskOperator {
-                        tool_name: tool_name.to_string(),
-                        target_path: first_resolved,
-                        action_summary: summarize_call(call),
-                    };
-                }
-            }
-
-            // A path in the jail is not enough. The tool must be explicitly allowed (listed, enabled
-            // by a preset or a known standard file tool) or be configured as a modifying tool.
-            // A name that only matches a generic file-name pattern is treated as an unknown tool.
-            let is_configured_modifying = self
-                .config
-                .custom_modifying_tools
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case(tool_name));
-            if !self.is_explicitly_allowed(tool_name) && !is_configured_modifying {
-                if is_write {
-                    return Decision::AskOperator {
-                        tool_name: tool_name.to_string(),
-                        target_path: resolved_paths.first().map(|(p, _)| p.clone()),
-                        action_summary: summarize_call(call),
-                    };
-                }
-                return Decision::Block(format!(
-                    "Unrecognized tool '{}' is not whitelisted by policy",
-                    tool_name
-                ));
-            }
-
-            return Decision::Allow;
+        // 4. Dangerous write actions in read-only mode
+        let is_write = self.is_modifying_tool(tool_name);
+        if is_write && self.config.read_only {
+            return Decision::Block(format!(
+                "Read-only policy active: modifying tool '{}' is prohibited",
+                tool_name
+            ));
         }
 
-        // 5. Always allowed read tools (if no path argument was extracted)
-        if self.is_listed_allowed(tool_name) || (is_standard_file_tool(tool_name) && !is_write) {
-            return Decision::Allow;
-        }
-
-        // 6. Fail-closed: Unknown or unclassified tools are NOT allowed by default!
-        if is_write {
-            Decision::AskOperator {
-                tool_name: tool_name.to_string(),
-                target_path: None,
-                action_summary: summarize_call(call),
-            }
-        } else {
-            Decision::Block(format!(
+        // 5. Authorization and classification, decided before anything can prompt. A path in the
+        // jail is not enough: the tool must be listed as allowed (by the user or by a preset) or
+        // be an exact standard filesystem tool name. A name that only matches a generic pattern,
+        // or a tool that is only classified as modifying, is unknown. An unknown tool that does
+        // not modify is blocked, so a `command` argument cannot turn it into a prompt.
+        let authorized = self.is_listed_allowed(tool_name)
+            || (is_standard_file_tool(tool_name) && (!extracted_paths.is_empty() || !is_write));
+        if !authorized && !is_write {
+            return Decision::Block(format!(
                 "Unrecognized tool '{}' is not whitelisted by policy",
                 tool_name
-            ))
+            ));
         }
+
+        // 6. Command arguments: a blocked command is always a block.
+        let command = self.extract_command_argument(call);
+        if let Some(cmd_str) = &command {
+            for blocked in &self.config.blocked_commands {
+                if command_matches_blocked(cmd_str, blocked) {
+                    return Decision::Block(format!(
+                        "Prohibited destructive command detected: matches '{}'",
+                        blocked
+                    ));
+                }
+            }
+
+            for re in &self.compiled_blocked_regexes {
+                if re.is_match(cmd_str) {
+                    return Decision::Block(format!(
+                        "Prohibited destructive command detected: matches pattern '{}'",
+                        re.as_str()
+                    ));
+                }
+            }
+        }
+
+        // 7./8. Operator approval. Any of these asks, none of them allows: a command argument, a
+        // write to a protected file (only when a path exists), `require_approval_on_write` for
+        // every modifying tool (with or without a path), and an unauthorized modifying tool.
+        let target_path = resolved_paths.first().map(|(p, _)| p.clone());
+        if let Some(cmd_str) = &command {
+            let action_summary = if has_dangerous_shell_metacharacters(cmd_str) {
+                format!(
+                    "Command contains dangerous shell metacharacters: {}",
+                    summarize_call(call)
+                )
+            } else {
+                summarize_call(call)
+            };
+            return Decision::AskOperator {
+                tool_name: tool_name.to_string(),
+                target_path,
+                action_summary,
+            };
+        }
+
+        if is_write {
+            for (resolved_path, raw_str) in &resolved_paths {
+                if self.is_protected_target(resolved_path) {
+                    return Decision::AskOperator {
+                        tool_name: tool_name.to_string(),
+                        target_path: Some(resolved_path.clone()),
+                        action_summary: format!(
+                            "Attempted modification of protected configuration/hook: {}",
+                            raw_str
+                        ),
+                    };
+                }
+            }
+
+            if self.config.require_approval_on_write || !authorized {
+                return Decision::AskOperator {
+                    tool_name: tool_name.to_string(),
+                    target_path,
+                    action_summary: summarize_call(call),
+                };
+            }
+        }
+
+        // 9. Authorized and nothing asked for approval.
+        Decision::Allow
     }
 
     /// Hardened path validation: Lexical fast-fail, component-by-component symlink check, inode check
@@ -966,6 +1027,50 @@ fn has_dos_short_name_segment(path: &str) -> bool {
     })
 }
 
+fn has_traversal_component(s: &str) -> bool {
+    s == ".."
+        || s.starts_with("../")
+        || s.starts_with(r"..\")
+        || s.ends_with("/..")
+        || s.ends_with(r"\..")
+        || s.contains("/../")
+        || s.contains(r"\..\")
+        || s.contains(r"/..\")
+        || s.contains(r"\../")
+}
+
+/// Decodes `%XX` sequences until the string no longer changes (at most 4 rounds). Invalid
+/// sequences are kept as they are.
+fn percent_decode_repeatedly(input: &str) -> String {
+    let mut current = input.to_string();
+    for _ in 0..4 {
+        if !current.contains('%') {
+            break;
+        }
+        let bytes = current.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    out.push(v);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        let next = String::from_utf8_lossy(&out).to_string();
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current
+}
+
 pub fn validate_lexical_syntax(path_str: &str) -> Result<()> {
     let trimmed = path_str.trim();
 
@@ -1037,16 +1142,10 @@ pub fn validate_lexical_syntax(path_str: &str) -> Result<()> {
         ));
     }
 
-    // 5. Prevent relative traversal components anywhere (start, middle, or end)
-    if trimmed == ".."
-        || trimmed.starts_with("../")
-        || trimmed.starts_with(r"..\")
-        || trimmed.ends_with("/..")
-        || trimmed.ends_with(r"\..")
-        || trimmed.contains("/../")
-        || trimmed.contains(r"\..\")
-        || trimmed.contains(r"/..\")
-        || trimmed.contains(r"\../")
+    // 5. Prevent relative traversal components anywhere (start, middle, or end), also when
+    //    they are percent-encoded (`%2e%2e/`, `..%2f`, `%252e%252e`).
+    if has_traversal_component(trimmed)
+        || has_traversal_component(&percent_decode_repeatedly(trimmed))
     {
         return Err(MoatError::PolicyViolation(
             "Directory traversal sequence '..' is prohibited".to_string(),
@@ -1322,102 +1421,97 @@ fn is_protected_system_file(path: &Path) -> bool {
         || s.ends_with("/.gitconfig")
 }
 
-/// Exact names of the tools of common MCP filesystem servers (for example
-/// `@modelcontextprotocol/server-filesystem`) and similar file tools. A call to one of these with
-/// a path inside the jail does not need to be listed in `always_allow_tools`. Name patterns alone
-/// never authorize a tool.
+/// Exact tool names of `@modelcontextprotocol/server-filesystem` (2.3.0). A call to one of these with
+/// a path inside the jail does not need to be listed in `always_allow_tools`. This is the only
+/// automatic authorization by name. The match is exact (case and spelling); name patterns and
+/// look-alike names (`rm`, `cat`, `shred`, `purge_dir`, `delete_file`) never authorize a tool.
+const STANDARD_FILESYSTEM_TOOLS: [&str; 16] = [
+    "read_file",
+    "read_text_file",
+    "read_media_file",
+    "read_multiple_files",
+    "write_file",
+    "edit_file",
+    "create_directory",
+    "list_directory",
+    "list_directory_with_sizes",
+    "directory_tree",
+    "move_file",
+    "copy_file",
+    "append_file",
+    "search_files",
+    "get_file_info",
+    "list_allowed_directories",
+];
+
 fn is_standard_file_tool(tool_name: &str) -> bool {
-    let lower = tool_name.to_lowercase().replace('-', "_");
-    matches!(
-        lower.as_str(),
-        "read_file"
-            | "read_text_file"
-            | "read_media_file"
-            | "list_directory"
-            | "list_directory_with_sizes"
-            | "directory_tree"
-            | "search_files"
-            | "grep"
-            | "read_multiple_files"
-            | "view_file"
-            | "cat"
-            | "head"
-            | "tail"
-            | "get_file"
-            | "fetch_file"
-            | "open_file"
-            | "read_lines"
-            | "get_file_info"
-            | "list_allowed_directories"
-            | "write_file"
-            | "edit_file"
-            | "create_file"
-            | "delete_file"
-            | "remove_file"
-            | "append_file"
-            | "patch_file"
-            | "replace_file"
-            | "truncate_file"
-            | "overwrite_file"
-            | "touch_file"
-            | "save_file"
-            | "put_file"
-            | "write_to_file"
-            | "create_directory"
-            | "create_dir"
-            | "delete_directory"
-            | "delete_dir"
-            | "remove_directory"
-            | "remove_dir"
-            | "rmdir"
-            | "mkdir"
-            | "move_file"
-            | "rename_file"
-            | "copy_file"
-            | "copy"
-            | "cp"
-            | "mv"
-            | "rm"
-            | "touch"
-            | "unlink"
-            | "unlink_file"
-            | "erase"
-            | "erase_file"
-            | "wipe"
-            | "wipe_file"
-            | "shred"
-            | "shred_file"
-            | "truncate"
-            | "overwrite"
-            | "clean_dir"
-            | "purge_dir"
-    )
+    STANDARD_FILESYSTEM_TOOLS.contains(&tool_name)
 }
 
-/// Standard tools that take no path. They are exempt from the path check.
-fn is_builtin_pathless_tool(tool_name: &str) -> bool {
+/// Names of file tools that are known by name. This only classifies a tool as a file tool (a
+/// path is required); it never authorizes it.
+fn is_known_file_tool_name(tool_name: &str) -> bool {
     let lower = tool_name.to_lowercase().replace('-', "_");
-    matches!(
-        lower.as_str(),
-        "list_allowed_directories" | "list_tables" | "show_schema" | "read_graph"
-    )
+    is_standard_file_tool(&lower)
+        || matches!(
+            lower.as_str(),
+            "view_file"
+                | "cat"
+                | "head"
+                | "tail"
+                | "get_file"
+                | "fetch_file"
+                | "open_file"
+                | "read_lines"
+                | "delete_file"
+                | "remove_file"
+                | "patch_file"
+                | "replace_file"
+                | "truncate_file"
+                | "overwrite_file"
+                | "touch_file"
+                | "save_file"
+                | "put_file"
+                | "write_to_file"
+                | "create_file"
+                | "create_dir"
+                | "delete_directory"
+                | "delete_dir"
+                | "remove_directory"
+                | "remove_dir"
+                | "rmdir"
+                | "mkdir"
+                | "rename_file"
+                | "copy"
+                | "cp"
+                | "mv"
+                | "rm"
+                | "touch"
+                | "unlink"
+                | "unlink_file"
+                | "erase"
+                | "erase_file"
+                | "wipe"
+                | "wipe_file"
+                | "shred"
+                | "shred_file"
+                | "truncate"
+                | "overwrite"
+                | "clean_dir"
+                | "purge_dir"
+        )
+}
+
+/// Standard tools that take no path. They are exempt from the path check. Pathless tools of
+/// other servers are exempted by the preset that enables them (`non_file_tools`) or by the user.
+fn is_builtin_pathless_tool(tool_name: &str) -> bool {
+    tool_name == "list_allowed_directories"
 }
 
 fn is_file_tool(tool_name: &str) -> bool {
     let lower_raw = tool_name.to_lowercase();
     let lower = lower_raw.replace('-', "_");
-    let standard = is_standard_file_tool(tool_name)
-        || matches!(
-            lower.as_str(),
-            "describe_table"
-                | "read_query"
-                | "search_nodes"
-                | "open_nodes"
-                | "list_tables"
-                | "show_schema"
-                | "read_graph"
-        );
-    standard
+    is_known_file_tool_name(tool_name)
         || lower.starts_with("read_")
         || lower.starts_with("list_")
         || lower.starts_with("search_")
@@ -1482,6 +1576,40 @@ fn resolve_against_base(base: &Option<String>, value: &str) -> String {
     }
 }
 
+/// True for argument keys that name a URL (`url`, `uri`, `href`, `source_url`, `urls`).
+fn is_url_key(k_norm: &str) -> bool {
+    ["url", "urls", "uri", "uris", "href"]
+        .iter()
+        .any(|suffix| k_norm.ends_with(suffix))
+}
+
+/// True for `http://` and `https://` URLs. These address the network, not the filesystem.
+fn is_http_url(s: &str) -> bool {
+    let lower = s.trim_start().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+/// Adds the value of a path-like argument to the paths that are checked. `file://` URIs are
+/// converted to local paths. An `http(s)` URL under a URL key (`url`, `href`, ...) is not a
+/// filesystem path and is skipped; under any other key (`path`, `file`, ...) it is kept and
+/// rejected by the lexical validator.
+fn push_path_candidate(paths: &mut Vec<String>, value: &str, base: &Option<String>, url_key: bool) {
+    if url_key && is_http_url(value) {
+        return;
+    }
+    if value
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("file://")
+    {
+        if let Ok(parsed) = parse_file_uri_to_path(value) {
+            paths.push(parsed.to_string_lossy().to_string());
+            return;
+        }
+    }
+    paths.push(resolve_against_base(base, value));
+}
+
 fn extract_paths_with_ignored_keys(
     val: &serde_json::Value,
     paths: &mut Vec<String>,
@@ -1502,6 +1630,7 @@ fn extract_paths_with_ignored_keys(
                 "filename",
                 "directory",
                 "dir",
+                "cwd",
                 "folder",
                 "dest",
                 "destination",
@@ -1609,28 +1738,13 @@ fn extract_paths_with_ignored_keys(
                         || k_norm.starts_with("path"));
 
                 if is_path_key {
+                    let url_key = is_url_key(&k_norm);
                     if let Some(s) = v.as_str() {
-                        if s.to_ascii_lowercase().starts_with("file://") {
-                            if let Ok(parsed) = parse_file_uri_to_path(s) {
-                                paths.push(parsed.to_string_lossy().to_string());
-                            } else {
-                                paths.push(resolve_against_base(base_ref, s));
-                            }
-                        } else {
-                            paths.push(resolve_against_base(base_ref, s));
-                        }
+                        push_path_candidate(paths, s, base_ref, url_key);
                     } else if let Some(arr) = v.as_array() {
                         for item in arr {
                             if let Some(s) = item.as_str() {
-                                if s.to_ascii_lowercase().starts_with("file://") {
-                                    if let Ok(parsed) = parse_file_uri_to_path(s) {
-                                        paths.push(parsed.to_string_lossy().to_string());
-                                    } else {
-                                        paths.push(resolve_against_base(base_ref, s));
-                                    }
-                                } else {
-                                    paths.push(resolve_against_base(base_ref, s));
-                                }
+                                push_path_candidate(paths, s, base_ref, url_key);
                             }
                         }
                     }

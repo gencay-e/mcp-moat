@@ -35,14 +35,18 @@ name = "stream_test"
 path = "tests/stream_test.rs"
 
 [[test]]
-name = "stress_simulation"
-path = "tests/stress_simulation.rs"
+name = "no_prompt"
+path = "tests/no_prompt.rs"
 
 [[test]]
-name = "sse_test"
-path = "tests/sse_test.rs"
+name = "stress_simulation"
+path = "tests/stress_simulation.rs"
 
 [[test]]
 name = "adversarial_fuzz_stress"
 path = "tests/adversarial_fuzz_stress.rs"
 
+
+[[test]]
+name = "methods_and_audit"
+path = "tests/methods_and_audit.rs"

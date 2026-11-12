@@ -500,7 +500,7 @@ async fn test_stress_3_16mb_frame_ceiling_simulation() {
     );
 
     // Fail-Closed Boundary Verification:
-    // As designed by zero-trust specification, an extreme 17 MB framing violation is a fatal
+    // By design, an extreme 17 MB framing violation is a fatal
     // framing error that permanently terminates the desynchronized stream after issuing the -32700 error.
     println!("Verifying fail-closed boundary termination after fatal framing violation...");
     drop(client_tx);

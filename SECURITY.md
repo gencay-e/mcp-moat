@@ -4,7 +4,7 @@
 
 Please report vulnerabilities privately and do not open a public issue. Use GitHub's private vulnerability reporting for `gencay-e/mcp-moat` (Security tab, "Report a vulnerability").
 
-Supported: the latest 0.2.x release.
+Supported: the latest published release.
 
 ## What mcp-moat is
 
@@ -42,13 +42,6 @@ These are known and are not fixed in the current release.
 
 **Configuration**
 * `moat.toml` (and the old name `fence.toml`) and the file given with `--config` are protected. Other configuration files that the agent should not change must be listed in `protected_files`.
-
-**Experimental SSE proxy and bridge** (only built with `--features experimental-sse`)
-* No TLS. `https://` is rejected. Traffic to the upstream server is not encrypted.
-* A POST with an unknown session id is forwarded to the upstream server with its original path.
-* Lines and headers from the upstream server have no length limit.
-* The path jail checks the local file system, not the remote one.
-* Little test coverage.
 
 **Platforms**
 * Linux is tested in development and CI.

@@ -11,7 +11,7 @@ pub enum MoatError {
     #[error("Policy violation: {0}")]
     PolicyViolation(String),
 
-    #[error("Path outside boundary: path '{attempted}' is not within sandbox root '{allowed}'")]
+    #[error("Path outside boundary: path '{attempted}' is not within allowed root '{allowed}'")]
     PathBoundaryViolation { attempted: String, allowed: String },
 
     #[error("Blocked command execution: {0}")]

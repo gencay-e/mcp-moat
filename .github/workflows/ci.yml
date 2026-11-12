@@ -42,21 +42,13 @@ jobs:
       - name: Check code formatting
         run: cargo fmt --all -- --check
 
-      - name: Run clippy (default features)
+      - name: Run clippy
         shell: bash
-        run: .github/scripts/run-with-annotations.sh "clippy default" cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: .github/scripts/run-with-annotations.sh "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Run clippy (all features)
+      - name: Run tests
         shell: bash
-        run: .github/scripts/run-with-annotations.sh "clippy all features" cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-
-      - name: Run tests (default features)
-        shell: bash
-        run: .github/scripts/run-with-annotations.sh "tests default" cargo test --workspace --all-targets --locked --no-fail-fast
-
-      - name: Run tests (all features)
-        shell: bash
-        run: .github/scripts/run-with-annotations.sh "tests all features" cargo test --workspace --all-targets --all-features --locked --no-fail-fast
+        run: .github/scripts/run-with-annotations.sh "tests" cargo test --workspace --all-targets --locked --no-fail-fast
 
       - name: Build release binaries
         run: cargo build --workspace --release --locked
@@ -92,7 +84,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install the git MCP server
-        run: python -m pip install mcp-server-git
+        run: python -m pip install mcp-server-git==2026.11.11
       - name: Build moat
         run: cargo build --release --locked --bin moat
       - name: Run moat in front of the real servers
@@ -128,6 +120,18 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+
+      - name: Check that the tag matches the workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          crate_version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ -z "$crate_version" ] || [ "$tag_version" != "$crate_version" ]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' does not match workspace.package.version '$crate_version' in Cargo.toml"
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME matches version $crate_version"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable

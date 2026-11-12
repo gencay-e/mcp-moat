@@ -37,7 +37,7 @@ def typed(prefix, s):
     print(flush=True)
 
 cmd = [MOAT, "wrap", "--no-prompt", "--allow", str(P), "--audit-log", str(LOG), "--",
-       "npx", "-y", "@modelcontextprotocol/server-filesystem", str(P)]
+       "npx", "-y", "@modelcontextprotocol/server-filesystem@2.3.0", str(P)]
 proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
 q = queue.Queue()
 threading.Thread(target=lambda: [q.put(l) for l in proc.stdout], daemon=True).start()

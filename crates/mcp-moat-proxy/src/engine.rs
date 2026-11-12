@@ -30,6 +30,92 @@ fn require_child_pipes<I, O, E>(
     Ok((stdin, stdout, stderr))
 }
 
+/// Short, printable form of a client-controlled string for log output (method names, ids).
+/// Anything else is replaced, so a log line never carries free-form client text.
+fn log_token(value: &str) -> &str {
+    if !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/' | b':'))
+    {
+        value
+    } else {
+        "<other>"
+    }
+}
+
+fn log_id(id: &Option<serde_json::Value>) -> String {
+    match id {
+        None | Some(serde_json::Value::Null) => "none".to_string(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::String(s)) => log_token(s).to_string(),
+        Some(_) => "<other>".to_string(),
+    }
+}
+
+/// Fixed violation category for monitor-mode diagnostics. The block reason itself can hold
+/// client-supplied paths, so it is never printed.
+fn block_category(reason: &str) -> &'static str {
+    if reason.contains("is hidden") {
+        "hidden tool"
+    } else if reason.contains("Read-only policy") {
+        "read-only"
+    } else if reason.contains("Unrecognized tool") {
+        "unknown tool"
+    } else if reason.contains("destructive command") || reason.contains("Blocked command") {
+        "blocked command"
+    } else if reason.contains("outside boundary") {
+        "path outside allowed folder"
+    } else {
+        "policy violation"
+    }
+}
+
+/// Standard MCP client-to-server methods and notifications. Anything else is refused unless it
+/// is listed in `allowed_methods`.
+const STANDARD_METHODS: &[&str] = &[
+    "initialize",
+    "ping",
+    "tools/list",
+    "tools/call",
+    "resources/list",
+    "resources/templates/list",
+    "resources/read",
+    "resources/subscribe",
+    "resources/unsubscribe",
+    "prompts/list",
+    "prompts/get",
+    "completion/complete",
+    "logging/setLevel",
+    "notifications/initialized",
+    "notifications/cancelled",
+    "notifications/progress",
+    "notifications/roots/list_changed",
+];
+
+fn method_allowed(method: &str, extra: &[String]) -> bool {
+    STANDARD_METHODS.contains(&method) || extra.iter().any(|m| m == method)
+}
+
+/// Answers a request that was not forwarded because the audit log could not be written.
+/// A notification (`id` is `None`) gets no response.
+async fn reply_audit_failed<W: AsyncWrite + Unpin>(out: &Mutex<W>, id: Option<serde_json::Value>) {
+    if let Some(id) = id {
+        let resp = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32603,
+                "message": "Request not forwarded: the audit log could not be written"
+            }
+        });
+        let mut out = out.lock().await;
+        let _ = out.write_all(format!("{}\n", resp).as_bytes()).await;
+        let _ = out.flush().await;
+    }
+}
+
 fn get_exit_code(status: std::process::ExitStatus) -> i32 {
     #[cfg(unix)]
     {
@@ -182,7 +268,11 @@ impl ProxyServer {
         W: AsyncWrite + Unpin + Send + 'static,
         E: AsyncWrite + Unpin + Send + 'static,
     {
-        info!("Spawning protected MCP server: {} {:?}", command, args);
+        info!(
+            "Spawning protected MCP server: {} ({} arguments)",
+            command,
+            args.len()
+        );
 
         let mut child = Command::new(command)
             .args(args)
@@ -403,7 +493,8 @@ impl ProxyServer {
                             continue;
                         }
 
-                        debug!("Inbound line from client: {}", trimmed);
+                        // Never log the line itself: it can hold arguments and secrets.
+                        debug!(bytes = trimmed.len(), "Inbound line from client");
 
                         // Reject JSON-RPC batch arrays immediately (Fail-Closed, -32600)
                         if trimmed.starts_with('[') {
@@ -422,6 +513,11 @@ impl ProxyServer {
                                 );
                             }
                             if !audit_ok() {
+                                reply_audit_failed(
+                                    &client_out_for_inbound,
+                                    Some(serde_json::Value::Null),
+                                )
+                                .await;
                                 continue;
                             }
 
@@ -443,14 +539,51 @@ impl ProxyServer {
                         let req: JsonRpcRequest = match serde_json::from_str(trimmed) {
                             Ok(r) => r,
                             Err(e) => {
+                                // A reply to a server request (roots/list, sampling, elicitation)
+                                // has no method and is passed on.
+                                let is_response =
+                                    serde_json::from_str::<serde_json::Value>(trimmed)
+                                        .ok()
+                                        .and_then(|v| {
+                                            let o = v.as_object()?;
+                                            (!o.contains_key("method")
+                                                && o.contains_key("id")
+                                                && (o.contains_key("result")
+                                                    || o.contains_key("error")))
+                                            .then_some(())
+                                        })
+                                        .is_some();
+                                if is_response {
+                                    if has_audit {
+                                        log_inbound(
+                                            AuditDirection::Inbound,
+                                            "response".to_string(),
+                                            None,
+                                            None,
+                                            Some(AuditDecision::Allow),
+                                            None,
+                                            Some(trimmed.to_string()),
+                                            None,
+                                        );
+                                    }
+                                    if !audit_ok() {
+                                        // a response gets no reply
+                                        continue;
+                                    }
+                                    let _ = normal_tx_clone.send(format!("{}\n", trimmed)).await;
+                                    continue;
+                                }
                                 let (err_code, err_name) =
                                     match serde_json::from_str::<serde_json::Value>(trimmed) {
                                         Ok(_) => (-32600, "Invalid Request"),
                                         Err(_) => (-32700, "Parse error"),
                                     };
+                                // The serde message can quote parts of the input; log position only.
                                 warn!(
-                                    "Rejecting malformed JSON-RPC line from client: {} ({})",
-                                    e, err_name
+                                    "Rejecting malformed JSON-RPC line from client: {} (line {}, column {})",
+                                    err_name,
+                                    e.line(),
+                                    e.column()
                                 );
                                 if has_audit {
                                     log_inbound(
@@ -467,6 +600,11 @@ impl ProxyServer {
                                     );
                                 }
                                 if !audit_ok() {
+                                    reply_audit_failed(
+                                        &client_out_for_inbound,
+                                        Some(serde_json::Value::Null),
+                                    )
+                                    .await;
                                     continue;
                                 }
 
@@ -485,12 +623,16 @@ impl ProxyServer {
                             }
                         };
 
+                        debug!(
+                            method = log_token(&req.method),
+                            id = %log_id(&req.id),
+                            bytes = trimmed.len(),
+                            "Inbound request"
+                        );
+
                         // Validate JSON-RPC 2.0 version
                         if req.jsonrpc != "2.0" {
-                            warn!(
-                                "Rejecting request with invalid jsonrpc version: '{}'",
-                                req.jsonrpc
-                            );
+                            warn!("Rejecting request with invalid jsonrpc version");
                             if !req.is_notification() {
                                 let err_resp = serde_json::json!({
                                     "jsonrpc": "2.0",
@@ -530,6 +672,7 @@ impl ProxyServer {
                                 );
                             }
                             if !audit_ok() {
+                                reply_audit_failed(&client_out_for_inbound, req.id.clone()).await;
                                 continue;
                             }
 
@@ -537,12 +680,16 @@ impl ProxyServer {
                             // If flooded (> 25 pings/sec), dispatch via normal queue to prevent priority starvation!
                             if ping_count_in_window <= 25 {
                                 if !audit_ok() {
+                                    reply_audit_failed(&client_out_for_inbound, req.id.clone())
+                                        .await;
                                     continue;
                                 }
                                 let _ = priority_tx_clone.send(format!("{}\n", trimmed)).await;
                             } else {
                                 warn!("Excessive ping rate ({} pings/s); routing to normal queue to prevent priority starvation", ping_count_in_window);
                                 if !audit_ok() {
+                                    reply_audit_failed(&client_out_for_inbound, req.id.clone())
+                                        .await;
                                     continue;
                                 }
                                 let _ = normal_tx_clone.send(format!("{}\n", trimmed)).await;
@@ -606,6 +753,8 @@ impl ProxyServer {
                                         );
                                     }
                                     if !audit_ok() {
+                                        reply_audit_failed(&client_out_for_inbound, req.id.clone())
+                                            .await;
                                         continue;
                                     }
                                     let _ = normal_tx_clone.send(format!("{}\n", trimmed)).await;
@@ -613,8 +762,9 @@ impl ProxyServer {
                                 Decision::Block(reason) => {
                                     if policy.config().monitor_mode {
                                         eprintln!(
-                                            "[mcp-moat:MONITOR] Simulated BLOCK for tool '{}': {}. Forwarding request.",
-                                            tool_call.name, reason
+                                            "[mcp-moat:MONITOR] Simulated BLOCK for tool '{}' ({}). Forwarding request.",
+                                            log_token(&tool_call.name),
+                                            block_category(&reason)
                                         );
                                         if has_audit {
                                             log_inbound(
@@ -629,12 +779,17 @@ impl ProxyServer {
                                             );
                                         }
                                         if !audit_ok() {
+                                            reply_audit_failed(
+                                                &client_out_for_inbound,
+                                                req.id.clone(),
+                                            )
+                                            .await;
                                             continue;
                                         }
                                         let _ =
                                             normal_tx_clone.send(format!("{}\n", trimmed)).await;
                                     } else {
-                                        warn!("Blocked tool call '{}': {}", tool_call.name, reason);
+                                        warn!("Blocked tool call '{}'", tool_call.name);
                                         if has_audit {
                                             log_inbound(
                                                 AuditDirection::Inbound,
@@ -689,6 +844,11 @@ impl ProxyServer {
                                             );
                                         }
                                         if !audit_ok() {
+                                            reply_audit_failed(
+                                                &client_out_for_inbound,
+                                                req.id.clone(),
+                                            )
+                                            .await;
                                             continue;
                                         }
                                         let _ =
@@ -735,6 +895,11 @@ impl ProxyServer {
                                             );
                                         }
                                         if !audit_ok() {
+                                            reply_audit_failed(
+                                                &client_out_for_inbound,
+                                                req.id.clone(),
+                                            )
+                                            .await;
                                             continue;
                                         }
                                         let _ =
@@ -862,9 +1027,14 @@ impl ProxyServer {
                                                         None,
                                                     );
                                                 }
-                                                if !audit_failed_for_approval
-                                                    .load(Ordering::Acquire)
+                                                if audit_failed_for_approval.load(Ordering::Acquire)
                                                 {
+                                                    reply_audit_failed(
+                                                        &client_out_approval,
+                                                        req_id,
+                                                    )
+                                                    .await;
+                                                } else {
                                                     let _ =
                                                         normal_tx_approval.send(forward_line).await;
                                                 }
@@ -899,9 +1069,14 @@ impl ProxyServer {
                                                         None,
                                                     );
                                                 }
-                                                if !audit_failed_for_approval
-                                                    .load(Ordering::Acquire)
+                                                if audit_failed_for_approval.load(Ordering::Acquire)
                                                 {
+                                                    reply_audit_failed(
+                                                        &client_out_approval,
+                                                        req_id,
+                                                    )
+                                                    .await;
+                                                } else {
                                                     let _ =
                                                         normal_tx_approval.send(forward_line).await;
                                                 }
@@ -1008,13 +1183,18 @@ impl ProxyServer {
                                             None,
                                         );
                                     }
+                                    if !audit_ok() {
+                                        reply_audit_failed(&client_out_for_inbound, req.id.clone())
+                                            .await;
+                                        continue;
+                                    }
                                     let _ = normal_tx_clone.send(format!("{}\n", trimmed)).await;
                                 }
                                 Decision::Block(reason) => {
                                     if policy.config().monitor_mode {
                                         eprintln!(
-                                            "[mcp-moat:MONITOR] Simulated BLOCK for resource '{}': {}. Forwarding request.",
-                                            resource_params.uri, reason
+                                            "[mcp-moat:MONITOR] Simulated BLOCK for resource request ({}). Forwarding request.",
+                                            block_category(&reason)
                                         );
                                         if has_audit {
                                             log_inbound(
@@ -1031,15 +1211,17 @@ impl ProxyServer {
                                             );
                                         }
                                         if !audit_ok() {
+                                            reply_audit_failed(
+                                                &client_out_for_inbound,
+                                                req.id.clone(),
+                                            )
+                                            .await;
                                             continue;
                                         }
                                         let _ =
                                             normal_tx_clone.send(format!("{}\n", trimmed)).await;
                                     } else {
-                                        warn!(
-                                            "Blocking resource request for '{}': {}",
-                                            resource_params.uri, reason
-                                        );
+                                        warn!("Blocking resource request");
                                         if has_audit {
                                             log_inbound(
                                                 AuditDirection::Inbound,
@@ -1075,8 +1257,7 @@ impl ProxyServer {
                                 Decision::AskOperator { action_summary, .. } => {
                                     if policy.config().monitor_mode {
                                         eprintln!(
-                                            "[mcp-moat:MONITOR] Bypassing prompt for resource '{}' ({}). Forwarding request.",
-                                            resource_params.uri, action_summary
+                                            "[mcp-moat:MONITOR] Bypassing prompt for resource request (approval required). Forwarding request."
                                         );
                                         if has_audit {
                                             log_inbound(
@@ -1092,13 +1273,18 @@ impl ProxyServer {
                                                 None,
                                             );
                                         }
+                                        if !audit_ok() {
+                                            reply_audit_failed(
+                                                &client_out_for_inbound,
+                                                req.id.clone(),
+                                            )
+                                            .await;
+                                            continue;
+                                        }
                                         let _ =
                                             normal_tx_clone.send(format!("{}\n", trimmed)).await;
                                     } else {
-                                        warn!(
-                                            "Rejecting unapproved resource access for '{}': {}",
-                                            resource_params.uri, action_summary
-                                        );
+                                        warn!("Rejecting unapproved resource access");
                                         if has_audit {
                                             log_inbound(
                                                 AuditDirection::Inbound,
@@ -1135,8 +1321,52 @@ impl ProxyServer {
                             continue;
                         }
 
-                        // Forward other standard JSON-RPC methods (initialize, tools/list, etc.)
-                        if has_audit {
+                        // Only standard MCP methods (and `allowed_methods`) are forwarded.
+                        if !method_allowed(&req.method, &policy.config().allowed_methods) {
+                            let monitor = policy.config().monitor_mode;
+                            if monitor {
+                                eprintln!(
+                                    "[mcp-moat:MONITOR] Simulated BLOCK for method '{}' (method not allowed). Forwarding request.",
+                                    log_token(&req.method)
+                                );
+                            } else {
+                                warn!("Refusing method that is not allowed");
+                            }
+                            if has_audit {
+                                log_inbound(
+                                    AuditDirection::Inbound,
+                                    req.method.clone(),
+                                    None,
+                                    None,
+                                    Some(AuditDecision::Block {
+                                        reason: "Method is not allowed by policy".to_string(),
+                                    }),
+                                    monitor.then(|| "MonitorForwarded".to_string()),
+                                    Some(trimmed.to_string()),
+                                    None,
+                                );
+                            }
+                            if !monitor {
+                                if !req.is_notification() {
+                                    let err_resp = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": req.id,
+                                        "error": {
+                                            "code": -32601,
+                                            "message": format!(
+                                                "Method '{}' is not allowed by mcp-moat policy",
+                                                log_token(&req.method)
+                                            )
+                                        }
+                                    });
+                                    let mut out = client_out_for_inbound.lock().await;
+                                    let _ =
+                                        out.write_all(format!("{}\n", err_resp).as_bytes()).await;
+                                    let _ = out.flush().await;
+                                }
+                                continue;
+                            }
+                        } else if has_audit {
                             log_inbound(
                                 AuditDirection::Inbound,
                                 req.method.clone(),
@@ -1149,6 +1379,7 @@ impl ProxyServer {
                             );
                         }
                         if !audit_ok() {
+                            reply_audit_failed(&client_out_for_inbound, req.id.clone()).await;
                             continue;
                         }
                         let _ = normal_tx_clone.send(format!("{}\n", trimmed)).await;
@@ -1219,7 +1450,8 @@ impl ProxyServer {
                             continue;
                         }
 
-                        debug!("Outbound line from child MCP server: {}", trimmed);
+                        // Never log the line itself: it can hold results and secrets.
+                        debug!(bytes = trimmed.len(), "Outbound line from child MCP server");
 
                         // Run AST-DLP inspection & sanitization
                         let (sanitized_line, redactions) = dlp_for_stdout.sanitize_line(trimmed);

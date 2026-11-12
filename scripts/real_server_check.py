@@ -2,7 +2,8 @@
 """Run mcp-moat in front of real MCP servers and check the result.
 
 Servers: @modelcontextprotocol/server-filesystem and @modelcontextprotocol/server-everything (Node.js,
-npx) and mcp-server-git (Python; `pip install mcp-server-git` or uvx).
+npx) and mcp-server-git (Python; `pip install mcp-server-git==2026.11.11` or uvx). The versions are pinned
+below.
 
 Usage: python scripts/real_server_check.py [path to moat binary]
 
@@ -27,7 +28,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MOAT = sys.argv[1] if len(sys.argv) > 1 else str(ROOT / "target" / "release" / ("moat.exe" if os.name == "nt" else "moat"))
-SERVER = [shutil.which("npx") or "npx", "-y", "@modelcontextprotocol/server-filesystem"]
+# Pinned server versions: a new upstream release must not change the result of this check.
+FILESYSTEM_SERVER = "@modelcontextprotocol/server-filesystem@2.3.0"
+EVERYTHING_SERVER = "@modelcontextprotocol/server-everything@2.3.0"
+GIT_SERVER_VERSION = "2026.11.11"
+SERVER = [shutil.which("npx") or "npx", "-y", FILESYSTEM_SERVER]
 FAILED: list[str] = []
 
 
@@ -101,7 +106,7 @@ def git_command() -> list[str] | None:
     if probe.returncode == 0:
         return [sys.executable, "-m", "mcp_server_git"]
     uvx = shutil.which("uvx")
-    return [uvx, "mcp-server-git"] if uvx else None
+    return [uvx, f"mcp-server-git=={GIT_SERVER_VERSION}"] if uvx else None
 
 
 def git_server() -> None:
@@ -161,7 +166,7 @@ def everything_server(work: Path) -> None:
     calls = [("echo", "echo", {"message": "hello"}), ("sum", "get-sum", {"a": 2, "b": 3}), ("env", "get-env", {}),
              ("unknown", "trigger-long-running-operation", {"duration": 1, "steps": 1}),
              ("image", "get-tiny-image", {})]
-    server = [shutil.which("npx") or "npx", "-y", "@modelcontextprotocol/server-everything"]
+    server = [shutil.which("npx") or "npx", "-y", EVERYTHING_SERVER]
     res, _ = session([MOAT, "wrap", "--no-prompt", "--config", str(config), "--"] + server, calls, timeout=120, env=env)
     check("hello" in text_of(res["echo"]) and not is_blocked(res["echo"]), "everything: an allowed tool works", text_of(res["echo"]))
     check("5" in text_of(res["sum"]) and not is_blocked(res["sum"]), "everything: non_file_tools lets get-sum run", text_of(res["sum"]))

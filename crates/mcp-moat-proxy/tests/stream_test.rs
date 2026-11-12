@@ -1142,7 +1142,7 @@ async fn test_stream_token_optimization_compact_schemas_hidden_tools_and_output_
     assert_eq!(tools.len(), 1, "write_file must be pruned from tools/list");
     assert_eq!(tools[0]["name"].as_str(), Some("echo"));
 
-    // 2. Calling hidden tool write_file directly -> blocked by Zero-Trust policy
+    // 2. Calling hidden tool write_file directly -> blocked by policy
     let hidden_call = json!({
         "jsonrpc": "2.0",
         "id": 2,

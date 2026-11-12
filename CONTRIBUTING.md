@@ -10,8 +10,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-The experimental SSE proxy is behind a feature: add `--features experimental-sse` (or `--all-features`).
-
 Tests against real MCP servers need Node.js, Python and `mcp-server-git`:
 
 ```bash

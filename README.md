@@ -16,14 +16,14 @@ A policy proxy for MCP servers, written in Rust. `moat` sits between an MCP clie
 
 <img alt="Four example tool calls: reading a file inside the project is allowed and a secret in it is masked, reading ../.ssh is blocked, writing project/.env and a shell command with a pipe both ask the operator" src="https://raw.githubusercontent.com/gencay-e/mcp-moat/main/docs/images/moat-example.svg" width="900">
 
-<img alt="Terminal recording: moat masks a key in project/notes.md, blocks a read of ../.ssh/id_ed25519, denies a write to project/.env because --no-prompt is set, and moat audit verify reports the hash chain as intact" src="https://raw.githubusercontent.com/gencay-e/mcp-moat/main/docs/images/moat-demo.gif" width="900">
+<img alt="Terminal recording of a scripted MCP client behind moat: moat masks a key in project/notes.md, blocks a read of ../.ssh/id_ed25519, denies a write to project/.env because --no-prompt is set, and moat audit verify reports the hash chain as intact" src="https://raw.githubusercontent.com/gencay-e/mcp-moat/main/docs/images/moat-demo.gif" width="900">
 
-A real run of moat in front of `@modelcontextprotocol/server-filesystem`, allowed folder `/srv/demo/project`. The verdict lines are shortened from moat's responses; `scripts/demo.py` drives the run and checks each line against the real output. The agent read `notes.md` (which holds a key), tried to read `../.ssh/id_ed25519` outside the folder, and tried to write `project/.env`, which was denied because `--no-prompt` is set:
+A real run of moat in front of `@modelcontextprotocol/server-filesystem`, allowed folder `/srv/demo/project`. The verdict lines are shortened from moat's responses; `scripts/demo.py` drives the run and checks each line against the real output. The scripted MCP client read `notes.md` (which holds a key), tried to read `../.ssh/id_ed25519` outside the folder, and tried to write `project/.env`, which was denied because `--no-prompt` is set:
 
 ```text
 $ moat audit query audit.jsonl --violations-only
 #4 [Outbound] method=dlp_redaction -> - [DLP: 4 redacted]
-#5 [Inbound]  method=tools/call   tool=read_file    -> BLOCK (Path outside boundary: path '/srv/demo/.ssh/id_ed25519' is not within sandbox root '/srv/demo/project')
+#5 [Inbound]  method=tools/call   tool=read_file    -> BLOCK (Path outside boundary: path '/srv/demo/.ssh/id_ed25519' is not within allowed root '/srv/demo/project')
 #6 [Inbound]  method=tools/call   tool=write_file   target=/srv/demo/project/.env -> ASK_OPERATOR [Operator: Deny] (Attempted modification of protected configuration/hook: /srv/demo/project/.env)
 
 $ moat audit verify audit.jsonl
@@ -33,11 +33,11 @@ $ moat audit verify audit.jsonl
   Cryptographic Chain:   INTACT (SHA-256)
 ```
 
-The output is from a run of `scripts/demo.py` and is shortened (timestamps and empty columns removed, the temporary folder replaced by `/srv/demo`). The agent got `OPENAI_API_KEY=[MCP-MOAT-REDACTED-SECRET]` instead of the key.
+The output is from a run of `scripts/demo.py` and is shortened (timestamps and empty columns removed, the temporary folder replaced by `/srv/demo`). The scripted MCP client got `OPENAI_API_KEY=[MCP-MOAT-REDACTED-SECRET]` instead of the key.
 
 ### Policy checks
 
-* **Path jail.** File paths in tool calls must stay inside the directories given with `--allow` (or `allowed_paths` in `moat.toml`). Paths with `..`, percent-encoded or double-encoded traversal, and `file://` URIs for `resources/read` and `resources/subscribe` are checked the same way.
+* **Path jail.** File paths in tool calls must stay inside the directories given with `--allow` (or `allowed_paths` in `moat.toml`). Paths with `..`, percent-encoded or double-encoded traversal, and `file://` URIs for `resources/read` and `resources/subscribe` are checked the same way. The jail is checked first: a call with a path outside the jail is blocked whatever the tool name or the other arguments are, also when it carries a command.
 * **UNC and NT paths.** Paths starting with `\\`, `//`, `\??\`, `/??/`, `\device\` or `/device/` are rejected before any file system access, as are the `\GLOBAL??\`, `\GLOBALROOT\`, `\DosDevices\`, `\SystemRoot\`, `\BaseNamedObjects\`, `\ArcName\` and `\KernelObjects\` namespaces. Separators are normalized first, so mixed forms such as `\/?\C:\` are caught too. This is a text check. It has not been verified against a real SMB or NTLM scenario on Windows.
 * **Protected files.** Writes to files such as `.git`, `.gitmodules`, `.gitconfig`, `.env`, `moat.toml`, `.vscode`, `.github`, the audit log, SSH keys and AWS credentials always need operator approval. The file passed to `--config` is added to this list automatically, so an agent cannot rewrite the policy that guards it.
 * **Read-only mode.** `--read-only` blocks tools that look like they modify files, based on tool name prefixes and suffixes, and tools listed in `custom_modifying_tools`.
@@ -65,7 +65,7 @@ For actions that need approval, `moat` asks on the terminal device directly (`/d
 * `stderr` of the child process is drained in its own task, so the child cannot block on a full pipe.
 * `ping` requests are passed on with priority.
 * On Ctrl+C the child process is terminated and `moat` exits with code 130.
-* `--monitor` (alias `--audit-only`) does not block. It forwards everything and logs what would have been blocked.
+* `--monitor` (alias `--audit-only`) does not block. It forwards everything and logs what would have been blocked. The terminal diagnostic names the tool and a fixed category (for example "path outside allowed folder"), never the path from the request.
 
 ### Audit log
 
@@ -188,7 +188,7 @@ blocked_commands = [
 ]
 
 # Tools that never need approval. A tool that moat does not know is blocked until it is listed
-# here (or covered by a preset).
+# here (or covered by a preset). custom_modifying_tools only classifies a tool, it does not allow it.
 always_allow_tools = [
     "list_directory",
     "read_file",
@@ -200,12 +200,17 @@ always_allow_tools = [
 # Otherwise they are blocked, because moat finds no path to check.
 # non_file_tools = ["get-sum"]
 
-# Argument names that look like paths but are not (the git preset sets the common ones).
+# Argument names that look like paths but are not. Ignored for every tool. The git and memory
+# presets ignore their keys for their own tools only.
 # ignore_path_keys = ["target"]
 
 compact_schemas = false
 # max_output_bytes = 16384
 hidden_tools = []
+
+# Extra JSON-RPC methods to forward (exact match). Only the standard MCP client-to-server
+# methods are forwarded by default; any other method is refused (-32601).
+# allowed_methods = ["x/vendor_method"]
 
 # Mask long Base64 runs as possible secrets. Off by default, see "Secret masking".
 # dlp_base64_heuristic = false
@@ -277,29 +282,6 @@ Edit `claude_desktop_config.json` (Windows: `%APPDATA%\Claude\`, macOS: `~/Libra
 
 ---
 
-## Experimental: `sse-proxy` and `sse-bridge`
-
-These two commands are experimental and are not part of the release binaries. Build them with:
-
-```bash
-cargo build --release --locked --bin moat --features experimental-sse
-```
-
-* `moat sse-proxy --listen 127.0.0.1:8765 --target http://host:8000/sse` listens locally and forwards to a remote MCP server that uses the older HTTP+SSE transport.
-* `moat sse-bridge --target http://host:8000/sse` connects a stdio client to such a server.
-
-Limits:
-
-* Only `http://` is supported. There is no TLS. `https://` URLs are rejected. Traffic to the upstream server is not encrypted.
-* The proxy rejects requests that carry an `Origin` header, and, when bound to a loopback address, requests whose `Host` header is not a loopback name. It sends no CORS headers.
-* The endpoint announced by the upstream server is always replaced by a proxy URL. If it points to another host, the stream is closed.
-* The path jail checks paths against the local file system, but the server is remote.
-* A POST with an unknown session id is forwarded to the upstream server with its original path.
-* Line length from the upstream server is not limited.
-* Only a few tests cover this code.
-
----
-
 ## Tested against real MCP servers
 
 `scripts/real_server_check.py` starts mcp-moat in front of three real servers and checks 58 cases (56 on Windows, where the two symlink cases are skipped). It needs Node.js, Python and git, and runs in CI on Linux.
@@ -308,13 +290,18 @@ Limits:
 * `mcp-server-git`: this server does not restrict itself. It reads any repository you name. mcp-moat keeps it inside the allowed folder, including relative file lists such as `files: ["src/main.rs"]`, which are checked against `repo_path`.
 * `@modelcontextprotocol/server-everything`: a tool that dumps the environment (`get-env`) has its secrets masked; tools that are not on the allow list are blocked.
 
-Other MCP servers were not tested.
+The servers are pinned: `@modelcontextprotocol/server-filesystem@2.3.0`, `@modelcontextprotocol/server-everything@2.3.0` and `mcp-server-git==2026.11.11` (also in `scripts/demo.py` and the CI workflow). Update the pins on purpose and run the check again. Other MCP servers and versions were not tested.
 
 ### Good to know
 
-* A tool is allowed without the operator only if it is listed in `always_allow_tools` or `custom_always_allow_tools`, is enabled by a preset, or has the exact name of a standard filesystem tool (`read_file`, `read_text_file`, `write_file`, `list_directory`, `directory_tree` and similar). A name that only looks like a file tool (`read_*`, `write_*`, `get_*`) never authorizes a tool. Its paths are still checked against the jail first. After that an unknown tool that does not modify is blocked, and an unknown tool that modifies needs operator approval (denied with `--no-prompt`). List the tool in `always_allow_tools` or `custom_always_allow_tools` to allow it.
-* Tools with a file-like name that take no path (`get-sum`) need `non_file_tools = ["get-sum"]`, otherwise mcp-moat blocks them because it finds no path to check. This includes calls without arguments. `list_allowed_directories` is exempt.
-* Argument names that look like paths but are not can be listed in `ignore_path_keys`. The git preset does this for `target`, `revision`, `branch_name` and similar.
+* **Order of checks.** (1) hidden tool, (2) path jail for every path argument, (3) file tool without a path, (4) modifying tool in read-only mode, (5) tool that is not authorized and does not modify, (6) blocked command, (7) any other command argument, (8) modifying tool with a protected file, `require_approval_on_write` (also without a path) or no authorization. The first match wins; the full table is in `docs/security-model.md`. A path outside the jail is always a block, never a prompt.
+* **Authorization.** A tool is allowed without the operator only if it is listed in `always_allow_tools` or `custom_always_allow_tools`, is enabled by a preset, or has the exact name of a tool of `@modelcontextprotocol/server-filesystem` (`read_file`, `read_text_file`, `read_media_file`, `read_multiple_files`, `write_file`, `edit_file`, `append_file`, `copy_file`, `create_directory`, `list_directory`, `list_directory_with_sizes`, `directory_tree`, `move_file`, `search_files`, `get_file_info`, `list_allowed_directories`). A name that only looks like a file tool (`read_*`, `write_*`, `get_*`) or a look-alike (`rm`, `cat`, `shred`, `delete_file`) never authorizes a tool. An unlisted tool that modifies needs operator approval (denied with `--no-prompt`), any other unlisted tool is blocked. List the tool in `always_allow_tools` or `custom_always_allow_tools` to allow it.
+* **Classification is not authorization.** `custom_modifying_tools` marks a tool as modifying: `--read-only` blocks it and it counts as a write. It does not allow the tool. Add the tool to `always_allow_tools` as well if it should run without a prompt.
+* **Commands.** A call with a command argument is never allowed automatically. It is blocked (blocked command) or needs operator approval. A tool that is not authorized and does not modify is blocked before its command is looked at.
+* **Tools without a path.** Tools with a file-like name that take no path (`get-sum`) need `non_file_tools = ["get-sum"]`, otherwise mcp-moat blocks them because it finds no path to check. This includes calls without arguments. `list_allowed_directories` is exempt. `non_file_tools` does not allow a tool; paths that are present are still checked. The presets list their own pathless tools (see below).
+* **URLs and paths.** Only local paths and `file://` URIs are checked as paths. An `http://` or `https://` URL in a URL argument (`url`, `uri`, `href`, `*_url`) is not a path and is not jail-checked. The tool that fetches it must still be authorized (listed or enabled by a preset). An `http(s)` URL in a path argument (`path`, `file`) is rejected, and `file://` URLs and bare paths in a URL argument are jail-checked.
+* **Presets.** `filesystem`: read tools and the standard filesystem tools are allowed, `delete_file` needs approval. `git`: read tools, `git_add`, `git_commit`, `git_create_branch` and `git_checkout` are allowed; `git_push`, `git_reset` and `git_merge` need approval. `fetch`: sets `read_only`, so `http_post`, `http_put`, `http_delete` and `http_patch` are blocked; `fetch`, `http_get`, `read_url` and `web_search` are allowed. `sqlite`: `read_query`, `list_tables`, `describe_table` and `show_schema` are allowed, `write_query`, `execute_query`, `create_table` and `drop_table` need approval. `memory`: `read_graph`, `search_nodes` and `open_nodes` are allowed, the tools that create, delete or add need approval. The pathless tools of `sqlite`, `memory` and `fetch` are exempted from the path requirement by the preset, not by their name. Without the preset they are unknown tools.
+* Argument names that look like paths but are not can be listed in `ignore_path_keys`. That is an operator decision: the keys are ignored for every tool of the policy. The presets ignore keys for their own tools only: git for `target`, `revision`, `branch_name` and similar (on `git_*` tools), memory for `from` and `to` (on the memory tools).
 * New files in directories that do not exist yet are blocked, because the parent folder cannot be resolved. Create the folder first.
 
 ## Platform status
@@ -343,7 +330,7 @@ Crates:
 | Crate | Content |
 |---|---|
 | `mcp-moat-core` | policy engine, path checks, secret masking, audit chain |
-| `mcp-moat-proxy` | stdio proxy, SSE proxy and bridge, mock server for tests |
+| `mcp-moat-proxy` | stdio proxy, mock server for tests |
 | `mcp-moat-tty` | terminal prompts, diffs, approval cache |
 | `mcp-moat-cli` | the `moat` binary |
 

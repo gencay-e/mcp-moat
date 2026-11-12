@@ -5,8 +5,6 @@ use mcp_moat_core::{
     PolicyEngine, TokenOptimizer,
 };
 use mcp_moat_proxy::ProxyServer;
-#[cfg(feature = "experimental-sse")]
-use mcp_moat_proxy::{SseBridgeServer, SseProxyServer};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -105,114 +103,6 @@ pub enum Commands {
         /// Shell to generate completions for
         #[arg(value_enum)]
         shell: clap_complete::Shell,
-    },
-
-    #[cfg(feature = "experimental-sse")]
-    /// Run an HTTP/SSE remote proxy guarding an upstream MCP server
-    SseProxy {
-        /// Local address and port to listen on (e.g. 127.0.0.1:8765)
-        #[arg(long = "listen", short = 'l', default_value = "127.0.0.1:8765")]
-        listen: String,
-
-        /// Target upstream remote MCP server SSE URL (e.g. http://127.0.0.1:8000/sse)
-        #[arg(long = "target", short = 't', required = true)]
-        target: String,
-
-        /// Allowed root directory for filesystem access (can specify multiple)
-        #[arg(long = "allow", short = 'a')]
-        allow: Vec<PathBuf>,
-
-        /// Preconfigured security preset (filesystem, git, fetch, sqlite, memory)
-        #[arg(long = "preset", short = 'p')]
-        preset: Option<String>,
-
-        /// Enforce strict read-only mode
-        #[arg(long = "read-only")]
-        read_only: bool,
-
-        /// Automatically deny actions requiring operator approval without TTY prompt
-        #[arg(long = "no-prompt")]
-        no_prompt: bool,
-
-        /// Run in monitor-only / audit-only mode
-        #[arg(long = "monitor", alias = "audit-only")]
-        monitor: bool,
-
-        /// File path for SHA-256 forensic audit log
-        #[arg(long = "audit-log")]
-        audit_log: Option<PathBuf>,
-
-        /// Granularity of audit logging: full, decisions_only, or violations_only
-        #[arg(long = "audit-level", value_parser = ["full", "decisions_only", "violations_only"])]
-        audit_level: Option<String>,
-
-        /// Compact outbound tool schemas and strip verbose metadata to save prompt tokens
-        #[arg(long = "compact-schemas")]
-        compact_schemas: bool,
-
-        /// Maximum byte budget for tool/resource outputs before context-window truncation
-        #[arg(long = "max-output-bytes")]
-        max_output_bytes: Option<usize>,
-
-        /// Hide and block specific tools from the LLM agent (can specify multiple)
-        #[arg(long = "hide-tool")]
-        hide_tool: Vec<String>,
-
-        /// Path to custom moat.toml configuration file
-        #[arg(long = "config", short = 'c')]
-        config: Option<PathBuf>,
-    },
-
-    #[cfg(feature = "experimental-sse")]
-    /// Bridge stdio JSON-RPC to a remote MCP SSE server under Zero-Trust firewall
-    SseBridge {
-        /// Target upstream remote MCP server SSE URL (e.g. http://127.0.0.1:8000/sse)
-        #[arg(long = "target", short = 't', required = true)]
-        target: String,
-
-        /// Allowed root directory for filesystem access (can specify multiple)
-        #[arg(long = "allow", short = 'a')]
-        allow: Vec<PathBuf>,
-
-        /// Preconfigured security preset (filesystem, git, fetch, sqlite, memory)
-        #[arg(long = "preset", short = 'p')]
-        preset: Option<String>,
-
-        /// Enforce strict read-only mode
-        #[arg(long = "read-only")]
-        read_only: bool,
-
-        /// Automatically deny actions requiring operator approval without TTY prompt
-        #[arg(long = "no-prompt")]
-        no_prompt: bool,
-
-        /// Run in monitor-only / audit-only mode
-        #[arg(long = "monitor", alias = "audit-only")]
-        monitor: bool,
-
-        /// File path for SHA-256 forensic audit log
-        #[arg(long = "audit-log")]
-        audit_log: Option<PathBuf>,
-
-        /// Granularity of audit logging: full, decisions_only, or violations_only
-        #[arg(long = "audit-level", value_parser = ["full", "decisions_only", "violations_only"])]
-        audit_level: Option<String>,
-
-        /// Compact outbound tool schemas and strip verbose metadata to save prompt tokens
-        #[arg(long = "compact-schemas")]
-        compact_schemas: bool,
-
-        /// Maximum byte budget for tool/resource outputs before context-window truncation
-        #[arg(long = "max-output-bytes")]
-        max_output_bytes: Option<usize>,
-
-        /// Hide and block specific tools from the LLM agent (can specify multiple)
-        #[arg(long = "hide-tool")]
-        hide_tool: Vec<String>,
-
-        /// Path to custom moat.toml configuration file
-        #[arg(long = "config", short = 'c')]
-        config: Option<PathBuf>,
     },
 
     /// Compile MCP tools/list schemas into compact Code-Mode SDK stubs (TypeScript, Python, or Markdown)
@@ -319,7 +209,8 @@ fn format_audit_event(event: &AuditEvent) -> String {
         .map(|r| format!(" [DLP: {} redacted]", r))
         .unwrap_or_default();
 
-    format!(
+    // The fields come from client requests: no control characters on the operator's terminal.
+    let line = format!(
         "#{:<4} {} [{:?}] method={:<12} tool={:<12} target={:<20} -> {}{}",
         event.sequence,
         event.timestamp,
@@ -329,7 +220,10 @@ fn format_audit_event(event: &AuditEvent) -> String {
         target_str,
         decision_str,
         dlp_str
-    )
+    );
+    line.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
 }
 
 struct LoadedConfig {
@@ -377,7 +271,11 @@ async fn main() -> Result<()> {
     // Write diagnostics to stderr only to keep stdout clean for JSON-RPC
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr())),
+        )
         .init();
 
     let cli = Cli::parse();
@@ -532,129 +430,6 @@ async fn main() -> Result<()> {
                 }
             };
             std::process::exit(exit_code);
-        }
-        #[cfg(feature = "experimental-sse")]
-        Commands::SseProxy {
-            listen,
-            target,
-            allow,
-            preset,
-            read_only,
-            no_prompt,
-            monitor,
-            audit_log,
-            audit_level,
-            compact_schemas,
-            max_output_bytes,
-            hide_tool,
-            config,
-        } => {
-            let mut policy_config = load_policy_config(config.as_deref())?.config;
-
-            if let Some(ref p_name) = preset {
-                policy_config
-                    .apply_preset(p_name)
-                    .with_context(|| format!("Failed to apply preset '{}'", p_name))?;
-            }
-            if !allow.is_empty() {
-                policy_config.allowed_paths = allow;
-            }
-            if read_only {
-                policy_config.read_only = true;
-            }
-            if monitor {
-                policy_config.monitor_mode = true;
-            }
-            if let Some(path) = audit_log {
-                policy_config.audit_log = Some(path);
-            }
-            if let Some(level_str) = audit_level {
-                if let Ok(lvl) = level_str.parse::<AuditLevel>() {
-                    policy_config.audit_level = lvl;
-                }
-            }
-            if compact_schemas {
-                policy_config.compact_schemas = true;
-            }
-            if let Some(m) = max_output_bytes {
-                policy_config.max_output_bytes = Some(m);
-            }
-            for ht in hide_tool {
-                if !policy_config.hidden_tools.contains(&ht) {
-                    policy_config.hidden_tools.push(ht);
-                }
-            }
-
-            let policy = PolicyEngine::new(policy_config)?;
-            let server = if no_prompt {
-                SseProxyServer::with_console(policy, None, &target)?
-            } else {
-                SseProxyServer::new(policy, &target)?
-            };
-
-            server.run(&listen).await?;
-            Ok(())
-        }
-        #[cfg(feature = "experimental-sse")]
-        Commands::SseBridge {
-            target,
-            allow,
-            preset,
-            read_only,
-            no_prompt,
-            monitor,
-            audit_log,
-            audit_level,
-            compact_schemas,
-            max_output_bytes,
-            hide_tool,
-            config,
-        } => {
-            let mut policy_config = load_policy_config(config.as_deref())?.config;
-
-            if let Some(ref p_name) = preset {
-                policy_config
-                    .apply_preset(p_name)
-                    .with_context(|| format!("Failed to apply preset '{}'", p_name))?;
-            }
-            if !allow.is_empty() {
-                policy_config.allowed_paths = allow;
-            }
-            if read_only {
-                policy_config.read_only = true;
-            }
-            if monitor {
-                policy_config.monitor_mode = true;
-            }
-            if let Some(path) = audit_log {
-                policy_config.audit_log = Some(path);
-            }
-            if let Some(level_str) = audit_level {
-                if let Ok(lvl) = level_str.parse::<AuditLevel>() {
-                    policy_config.audit_level = lvl;
-                }
-            }
-            if compact_schemas {
-                policy_config.compact_schemas = true;
-            }
-            if let Some(m) = max_output_bytes {
-                policy_config.max_output_bytes = Some(m);
-            }
-            for ht in hide_tool {
-                if !policy_config.hidden_tools.contains(&ht) {
-                    policy_config.hidden_tools.push(ht);
-                }
-            }
-
-            let policy = PolicyEngine::new(policy_config)?;
-            let bridge = if no_prompt {
-                SseBridgeServer::with_console(policy, None, &target)?
-            } else {
-                SseBridgeServer::new(policy, &target)?
-            };
-
-            bridge.run().await?;
-            Ok(())
         }
         Commands::Codegen {
             format,

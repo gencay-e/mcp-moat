@@ -16,11 +16,6 @@ categories.workspace = true
 name = "moat"
 path = "src/main.rs"
 
-[features]
-default = []
-# sse-proxy and sse-bridge are experimental and not built by default.
-experimental-sse = []
-
 [dependencies]
 mcp-moat-core = { path = "../mcp-moat-core", version = "0.3.0" }
 mcp-moat-proxy = { path = "../mcp-moat-proxy", version = "0.3.0" }

@@ -228,11 +228,11 @@ impl DirectConsole {
         self.write_str("\n")?;
         self.write_str(separator)?;
         self.write_str(" [MCP-MOAT INTERCEPT] Sensitive Tool Action Requested:\n")?;
-        self.write_str(&format!(" Action: {}\n", summary))?;
+        self.write_str(&format!(" Action: {}\n", display_safe(summary, false)))?;
 
         if let Some(diff) = diff_preview {
             self.write_str("\n Diff Preview:\n")?;
-            self.write_str(diff)?;
+            self.write_str(&display_safe(diff, true))?;
             self.write_str("\n")?;
         }
 
@@ -255,10 +255,48 @@ impl DirectConsole {
     }
 }
 
+/// Replaces control characters (escape sequences, carriage returns, bells) so request-derived
+/// text cannot rewrite the operator's terminal. Newlines and tabs stay when `keep_layout` is set.
+fn display_safe(text: &str, keep_layout: bool) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() && !(keep_layout && (c == '\n' || c == '\t')) {
+                '?'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn test_prompt_text_has_no_control_characters() {
+        let input = Cursor::new(b"n\n");
+        #[derive(Clone)]
+        struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Shared {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Shared(Default::default());
+        let mut console = DirectConsole::with_io(input, buf.clone());
+        console
+            .ask_approval_detailed("write\x1b[2J\r\nfake: ok", Some("a\x1b[31m\nb"))
+            .unwrap();
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(!out.contains('\x1b') && !out.contains('\r'), "{out:?}");
+        assert!(out.contains("write?[2J??fake: ok"));
+    }
 
     #[test]
     fn test_approval_decision_yes() {

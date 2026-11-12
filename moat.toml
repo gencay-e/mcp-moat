@@ -28,8 +28,10 @@ blocked_commands = [
 ]
 
 # Tools that are allowed without operator approval (after the path checks).
-# Tools of standard filesystem servers are recognized by exact name. Other unlisted tools
-# are blocked, or need operator approval if they look like they modify files.
+# Tools of @modelcontextprotocol/server-filesystem are recognized by exact name. Other unlisted
+# tools are blocked, or need operator approval if they look like they modify files.
+# custom_modifying_tools (not set here) only marks a tool as modifying (read_only blocks it).
+# It never allows the tool.
 always_allow_tools = [
     "list_directory",
     "read_file",
@@ -39,11 +41,12 @@ always_allow_tools = [
 
 # Tools whose names look like file tools (read_*, get_*, list_*, ...) but that take no path,
 # for example "get-sum". Without this list a call of such a tool is blocked, because moat
-# cannot find a path to check. List only tools you know.
+# cannot find a path to check. This does not allow the tool: list it in always_allow_tools too.
+# List only tools you know.
 # non_file_tools = ["get-sum"]
 
 # Argument names that look like paths but are not (for example a git revision called "target").
-# The git preset already sets the common ones.
+# Ignored for every tool. The git preset already sets the common ones for the git tools only.
 # ignore_path_keys = ["target"]
 
 # Audit log with SHA-256 hash chain (tamper-evident, not tamper-proof).
@@ -68,6 +71,13 @@ compact_schemas = false
 
 # Hide specific tools from `tools/list` discovery AND block them on `tools/call`.
 hidden_tools = []
+
+# Only the standard MCP client-to-server methods are forwarded (initialize, ping, tools/*,
+# resources/*, prompts/*, completion/complete, logging/setLevel, notifications/initialized,
+# notifications/cancelled, notifications/progress, notifications/roots/list_changed).
+# Any other method is refused with -32601 (notifications are dropped). List extra methods
+# of your server here (exact match), for example a vendor extension.
+# allowed_methods = ["x/vendor_method"]
 
 # ==============================================================================
 # Server Profiles & Presets

@@ -1364,6 +1364,18 @@ async fn test_monitor_mode_stderr_never_contains_request_strings() {
     let mock_server = get_mock_server_bin();
     let dir = std::env::temp_dir().join(format!("moat_monitor_log_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
+    // A real, existing directory next to the jail (not inside it). A Unix-style "/etc/..." path is
+    // not absolute on Windows and resolves to a missing parent there, which is a different
+    // (I/O) category, so the out-of-jail path is built from the platform temp dir instead.
+    let outside = std::env::temp_dir().join(format!("moat_monitor_out_{}", std::process::id()));
+    std::fs::create_dir_all(&outside).unwrap();
+    let outside_file = outside.join(format!("{MARKER}.txt"));
+    let outside_file_str = outside_file.to_str().unwrap().to_string();
+    let outside_uri = format!(
+        "file://{}{}",
+        if cfg!(windows) { "/" } else { "" },
+        outside_file_str.replace('\\', "/")
+    );
     let config_path = dir.join("moat.toml");
     std::fs::write(
         &config_path,
@@ -1405,14 +1417,14 @@ async fn test_monitor_mode_stderr_never_contains_request_strings() {
     let requests = vec![
         // path outside the jail, in the path and in the tool name
         json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "write_file", "arguments": {"path": format!("/etc/{MARKER}/x"), "content": "c"}}})
+            "params": {"name": "write_file", "arguments": {"path": outside_file_str, "content": "c"}}})
         .to_string(),
         json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": format!("evil\n{MARKER}\u{1b}[2J"), "arguments": {"path": format!("/etc/{MARKER}")}}})
+            "params": {"name": format!("evil\n{MARKER}\u{1b}[2J"), "arguments": {"path": outside_file_str}}})
         .to_string(),
         // resource outside the jail
         json!({"jsonrpc": "2.0", "id": 3, "method": "resources/read",
-            "params": {"uri": format!("file:///etc/{MARKER}")}})
+            "params": {"uri": outside_uri}})
         .to_string(),
         // unknown method (a short plain method name is logged as a token at debug level)
         json!({"jsonrpc": "2.0", "id": 4, "method": "x/unknown"}).to_string(),
@@ -1436,6 +1448,8 @@ async fn test_monitor_mode_stderr_never_contains_request_strings() {
     let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
     let log = stderr_task.await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&outside);
+    let log = log.replace("\r\n", "\n");
 
     assert!(
         log.contains("[mcp-moat:MONITOR] Simulated BLOCK"),

@@ -8,7 +8,7 @@ A policy proxy for MCP servers, written in Rust. `moat` sits between an MCP clie
 
 <img alt="moat sits between an MCP client such as Claude Desktop, Claude Code or Cursor and an MCP server, talks stdio to both, checks paths and commands, masks secrets, asks the operator on the terminal and writes a hash-chained audit log" src="https://raw.githubusercontent.com/gencay-e/mcp-moat/main/docs/images/moat-flow.svg" width="900">
 
-`moat` filters stdio traffic and prompts the operator, but it does not sandbox the server process itself. Read [SECURITY.md](https://github.com/gencay-e/mcp-moat/blob/main/SECURITY.md) for what it does not protect against, and [CHANGELOG.md](https://github.com/gencay-e/mcp-moat/blob/main/CHANGELOG.md) for the current release (`0.3.0`).
+`moat` filters stdio traffic and prompts the operator, but it does not sandbox the server process itself. Read [SECURITY.md](https://github.com/gencay-e/mcp-moat/blob/main/SECURITY.md) for what it does not protect against, and [CHANGELOG.md](https://github.com/gencay-e/mcp-moat/blob/main/CHANGELOG.md) for the changes in each release.
 
 ---
 

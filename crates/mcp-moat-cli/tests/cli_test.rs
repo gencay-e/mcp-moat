@@ -5,6 +5,87 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_wrap_resolves_cmd_from_path() {
+    let dir = std::env::var_os("MOAT_TEST_TEMP")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("moat-cmd-regression-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("moat-test-launch.cmd"),
+        "@echo off\r\necho batch-launch-ok\r\n",
+    )
+    .unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(dir.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let output = Command::new(get_moat_bin())
+        .args(["wrap", "--preset", "filesystem", "--", "moat-test-launch"])
+        .env("PATH", path)
+        .env("PATHEXT", ".EXE;.CMD;.BAT")
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success(), "Windows PATH batch launch failed");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("batch-launch-ok"));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_codegen_resolves_cmd_and_preserves_arguments() {
+    let dir = std::env::var_os("MOAT_TEST_TEMP")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("moat-codegen-regression-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("moat-codegen-launch.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\n\"{}\" %*\r\n",
+            get_mock_server_bin().display()
+        ),
+    )
+    .unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(dir.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let output = Command::new(get_moat_bin())
+        .args(["codegen", "--format", "ts", "--", "moat-codegen-launch"])
+        .env("PATH", path)
+        .env("PATHEXT", ".CMD;.EXE;.BAT")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Windows codegen PATH batch launch failed"
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("echo"));
+
+    let marker = dir.join("injected.txt");
+    let _ = std::fs::remove_file(&marker);
+    std::fs::write(&script, "@echo off\r\necho %1\r\n").unwrap();
+    let argument = format!("hello & echo injected > {}", marker.display());
+    let output = Command::new(get_moat_bin())
+        .args(["wrap", "--", script.to_str().unwrap(), &argument])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Windows batch argument launch failed"
+    );
+    assert!(!marker.exists(), "batch argument executed a shell command");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("hello & echo injected"));
+}
+
 fn get_moat_bin() -> &'static str {
     env!("CARGO_BIN_EXE_moat")
 }
@@ -1321,8 +1402,11 @@ async fn test_trace_logging_never_contains_payloads_or_secrets() {
         let out: Value = serde_json::from_str(&line).unwrap();
         if out["id"] == json!(1) {
             // the allowed call: the secrets in the response are masked for the client
-            for secret in [AWS, GITHUB, API_KEY] {
-                assert!(!line.contains(secret), "{line}");
+            for (case, secret) in [AWS, GITHUB, API_KEY].into_iter().enumerate() {
+                assert!(
+                    !line.contains(secret),
+                    "response redaction case {case} failed"
+                );
             }
         }
         seen += 1;
@@ -1336,21 +1420,27 @@ async fn test_trace_logging_never_contains_payloads_or_secrets() {
     // the trace level is really on: the log is not empty and carries the safe fields
     assert!(
         log.contains("Inbound request") && log.contains("method=\"tools/call\""),
-        "trace logging did not run, log was:\n{log}"
+        "trace logging test: expected safe fields missing"
     );
-    for secret in [
+    for (case, secret) in [
         AWS,
         GITHUB,
         API_KEY,
         ENV_SECRET,
         EXTRA_ARG,
         "MOAT_TEST_ENV_SECRET",
-    ] {
-        assert!(!log.contains(secret), "log contains {secret:?}:\n{log}");
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            !log.contains(secret),
+            "trace logging test: secret case {case} leaked"
+        );
     }
     assert!(
         !log.contains("/etc/moat-test"),
-        "log contains an argument value:\n{log}"
+        "trace logging test: argument value leaked"
     );
 }
 

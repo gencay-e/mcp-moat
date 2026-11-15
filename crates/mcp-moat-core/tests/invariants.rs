@@ -1320,16 +1320,19 @@ fn inv4_known_secret_formats_are_masked_in_responses() {
         "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
         "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----",
     ];
-    for s in secrets {
+    for (case, s) in secrets.into_iter().enumerate() {
         let mut v =
             json!({"result": {"content": [{"type": "text", "text": format!("value: {s} end")}]}});
         let n = dlp.sanitize_json_value(&mut v);
         let out = v.to_string();
-        assert!(n >= 1, "{s}: nothing redacted");
-        assert!(out.contains("[MCP-MOAT-REDACTED-SECRET]"), "{s}: {out}");
+        assert!(n >= 1, "DLP case {case}: nothing redacted");
+        assert!(
+            out.contains("[MCP-MOAT-REDACTED-SECRET]"),
+            "DLP case {case}: redaction marker missing"
+        );
         assert!(
             !out.contains("AKIAIOSFODNN7EXAMPLE") && !out.contains("ghp_abcdef"),
-            "{out}"
+            "DLP case {case}: secret remains"
         );
     }
 }

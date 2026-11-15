@@ -481,7 +481,9 @@ async fn main() -> Result<()> {
                 let cmd = &server_command[0];
                 let args = &server_command[1..];
 
-                let mut child = TokioCommand::new(cmd)
+                let executable = mcp_moat_proxy::command::resolve_command(cmd.as_ref())
+                    .with_context(|| format!("Failed to resolve MCP server '{}'", cmd))?;
+                let mut child = TokioCommand::new(executable)
                     .args(args)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())

@@ -17,9 +17,9 @@ name = "moat"
 path = "src/main.rs"
 
 [dependencies]
-mcp-moat-core = { path = "../mcp-moat-core", version = "0.3.0" }
-mcp-moat-proxy = { path = "../mcp-moat-proxy", version = "0.3.0" }
-mcp-moat-tty = { path = "../mcp-moat-tty", version = "0.3.0" }
+mcp-moat-core = { path = "../mcp-moat-core", version = "0.3.1" }
+mcp-moat-proxy = { path = "../mcp-moat-proxy", version = "0.3.1" }
+mcp-moat-tty = { path = "../mcp-moat-tty", version = "0.3.1" }
 clap.workspace = true
 clap_complete.workspace = true
 tokio.workspace = true

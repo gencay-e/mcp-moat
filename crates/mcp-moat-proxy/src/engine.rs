@@ -274,7 +274,9 @@ impl ProxyServer {
             args.len()
         );
 
-        let mut child = Command::new(command)
+        let executable = crate::command::resolve_command(command.as_ref())
+            .map_err(|e| anyhow::anyhow!("Failed to spawn wrapped command '{}': {}", command, e))?;
+        let mut child = Command::new(executable)
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

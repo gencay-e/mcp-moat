@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1 (2026-11-15)
+
+### Fixed
+
+* Windows `wrap` and `codegen` resolve commands through `PATH` and `PATHEXT`, including `.cmd` and `.bat` launchers such as `npx.cmd`. Arguments are passed through Rust's standard process API, including its batch-file escaping.
+* Secret-redaction tests report the failing case without printing secret values or captured log content.
+* The MIT license heading no longer has a Markdown prefix.
+
+### Maintenance
+
+* All four crates use version 0.3.1.
+* Update pinned GitHub Actions for checkout, toolchain setup, artifacts, releases and CodeQL. Cargo dependencies remain on their current compatible versions; larger upgrades need a separate migration review.
+
 ## 0.3.0 (2026-11-13)
 
 ### Behavior changes (breaking: calls that 0.2.x allowed can now be blocked or need approval)

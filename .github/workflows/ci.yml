@@ -67,7 +67,7 @@ jobs:
         run: cargo audit
 
   real-server:
-    name: Real MCP servers (filesystem, git, everything)
+    name: Real MCP servers
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -83,8 +83,8 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - name: Install the git MCP server
-        run: python -m pip install mcp-server-git==2026.11.11
+      - name: Install uv and the git MCP server
+        run: python -m pip install uv==0.11.33 mcp-server-git==2026.11.11
       - name: Build moat
         run: cargo build --release --locked --bin moat
       - name: Run moat in front of the real servers

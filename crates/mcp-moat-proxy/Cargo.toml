@@ -14,8 +14,8 @@ categories.workspace = true
 autotests = false
 
 [dependencies]
-mcp-moat-core = { path = "../mcp-moat-core", version = "0.3.1" }
-mcp-moat-tty = { path = "../mcp-moat-tty", version = "0.3.1" }
+mcp-moat-core = { path = "../mcp-moat-core", version = "0.4.0" }
+mcp-moat-tty = { path = "../mcp-moat-tty", version = "0.4.0" }
 tokio.workspace = true
 tokio-util.workspace = true
 serde.workspace = true
@@ -50,3 +50,6 @@ path = "tests/adversarial_fuzz_stress.rs"
 [[test]]
 name = "methods_and_audit"
 path = "tests/methods_and_audit.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }

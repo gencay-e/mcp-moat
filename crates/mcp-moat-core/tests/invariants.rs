@@ -144,6 +144,88 @@ fn inv1_in_jail_paths_are_not_blocked() {
 }
 
 #[test]
+fn inv1_new_nested_targets_use_the_deepest_existing_ancestor() {
+    let e = engine();
+    let base = jail().join("sub"); // created by jail()
+    for rel in ["new-a/new-b/new-c.txt", "new-root/one/two/three.txt"] {
+        let path = base.join(rel).to_string_lossy().to_string();
+        let d = e.evaluate_tool_call(&call("write_file", json!({"path": path, "content": "x"})));
+        assert!(is_allow(&d), "new in-jail target {path} gave {d:?}");
+    }
+}
+
+#[test]
+fn inv1_existing_file_cannot_be_used_as_a_path_ancestor() {
+    let file = jail().join(format!("not-a-directory-{}", std::process::id()));
+    std::fs::write(&file, "x").unwrap();
+    let path = file.join("child").join("grandchild.txt");
+    let e = engine();
+    let d = e.evaluate_tool_call(&call(
+        "write_file",
+        json!({"path": path.to_string_lossy(), "content": "x"}),
+    ));
+    assert!(is_block(&d), "file ancestor {path:?} gave {d:?}");
+    std::fs::remove_file(file).unwrap();
+}
+
+#[test]
+fn inv1_every_new_path_segment_is_lexically_checked() {
+    let e = engine();
+    for segment in ["NUL", "file:stream", "PROGRA~1", "%252e%252e"] {
+        let path = jail()
+            .join("new-parent")
+            .join(segment)
+            .join("target.txt")
+            .to_string_lossy()
+            .to_string();
+        let d = e.evaluate_tool_call(&call("write_file", json!({"path": path, "content": "x"})));
+        assert!(is_block(&d), "invalid new segment {segment:?} gave {d:?}");
+    }
+}
+
+fn assert_hardlink_alias_is_blocked() {
+    let dir = jail().join(format!("hardlink-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let original = dir.join("original.txt");
+    let alias = dir.join("alias.txt");
+    std::fs::write(&original, "x").unwrap();
+    std::fs::hard_link(&original, &alias).unwrap();
+
+    let e = engine();
+    for path in [&original, &alias] {
+        let path = path.to_string_lossy().to_string();
+        let d = e.evaluate_tool_call(&call("read_file", json!({"path": path})));
+        assert!(is_block(&d), "hardlinked file {path} gave {d:?}");
+    }
+    #[cfg(unix)]
+    {
+        let symlink = dir.join("symbolic.txt");
+        std::os::unix::fs::symlink(&original, &symlink).unwrap();
+        assert!(
+            e.validate_path_secure(&symlink.to_string_lossy()).is_err(),
+            "symlink to a hardlinked target must be denied"
+        );
+        std::fs::remove_file(symlink).unwrap();
+    }
+
+    std::fs::remove_file(alias).unwrap();
+    std::fs::remove_file(original).unwrap();
+    std::fs::remove_dir(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn inv1_unix_hardlink_alias_is_blocked() {
+    assert_hardlink_alias_is_blocked();
+}
+
+#[cfg(windows)]
+#[test]
+fn inv1_windows_hardlink_alias_is_blocked() {
+    assert_hardlink_alias_is_blocked();
+}
+
+#[test]
 fn inv1_path_is_checked_before_command_approval_or_allow_decisions() {
     // The review finding: a command-like argument returned AskOperator before the path check.
     let e = engine();
@@ -1444,6 +1526,73 @@ fn operator_ignore_keys_stay_global() {
         json!({"path": jp("a.txt"), "target": "HEAD~1"}),
     ));
     assert!(is_allow(&d), "{d:?}");
+}
+
+#[test]
+fn postgres_and_playwright_presets_preserve_authorization_and_jail() {
+    let postgres = preset_engine("postgres");
+    for tool in ["read_query", "list_tables", "describe_table", "show_schema"] {
+        assert!(
+            is_allow(&postgres.evaluate_tool_call(&call(tool, json!({})))),
+            "postgres read tool"
+        );
+    }
+    for tool in [
+        "query",
+        "write_query",
+        "execute_query",
+        "create_table",
+        "drop_table",
+    ] {
+        assert!(
+            is_ask(
+                &postgres
+                    .evaluate_tool_call(&call(tool, json!({"query":"UPDATE fixture SET x=1"})))
+            ),
+            "postgres write tool"
+        );
+    }
+    let browser = preset_engine("playwright");
+    for tool in ["browser_navigate", "browser_snapshot"] {
+        assert!(
+            is_allow(
+                &browser.evaluate_tool_call(&call(tool, json!({"url":"https://example.com"})))
+            ),
+            "browser read tool"
+        );
+    }
+    for tool in [
+        "browser_evaluate",
+        "browser_run_code",
+        "browser_file_upload",
+        "browser_download",
+        "browser_take_screenshot",
+    ] {
+        assert!(
+            is_ask(&browser.evaluate_tool_call(&call(tool, json!({})))),
+            "browser sensitive tool"
+        );
+    }
+    assert!(
+        is_ask(&browser.evaluate_tool_call(&call(
+            "browser_snapshot",
+            json!({"filename":jp("snapshot.md")})
+        ))),
+        "snapshot output requires approval"
+    );
+    for engine in [&postgres, &browser] {
+        assert!(
+            is_block(&engine.evaluate_tool_call(&call(
+                "browser_snapshot",
+                json!({"filename":"../../outside.md"})
+            ))),
+            "jail precedes preset"
+        );
+        assert!(
+            is_block(&engine.evaluate_tool_call(&call("unlisted_read", json!({})))),
+            "unlisted tools remain denied"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

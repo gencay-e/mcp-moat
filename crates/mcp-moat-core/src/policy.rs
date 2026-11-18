@@ -8,6 +8,18 @@ use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyConfig {
+    /// Remove common credential variables before starting a wrapped server.
+    #[serde(default = "default_scrub_env")]
+    pub scrub_env: bool,
+
+    /// Exact environment names that may be inherited despite scrubbing.
+    #[serde(default)]
+    pub pass_env: Vec<String>,
+
+    /// Inherit only base process variables and pass_env.
+    #[serde(default)]
+    pub clear_env: bool,
+
     #[serde(default = "default_allowed_paths")]
     pub allowed_paths: Vec<PathBuf>,
 
@@ -158,6 +170,10 @@ fn default_allowed_paths() -> Vec<PathBuf> {
     vec![PathBuf::from(".")]
 }
 
+fn default_scrub_env() -> bool {
+    true
+}
+
 fn default_read_only() -> bool {
     false
 }
@@ -201,6 +217,9 @@ fn default_always_allow_tools() -> Vec<String> {
 impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
+            scrub_env: true,
+            pass_env: Vec::new(),
+            clear_env: false,
             allowed_paths: default_allowed_paths(),
             read_only: default_read_only(),
             require_approval_on_write: default_require_approval_on_write(),
@@ -425,6 +444,51 @@ impl PolicyConfig {
                 max_output_bytes: None,
                 hidden_tools: None,
             }),
+            "postgres" => {
+                let mut preset = Self::get_builtin_preset("sqlite")?;
+                let generic = "query".to_string();
+                preset
+                    .custom_modifying_tools
+                    .as_mut()?
+                    .push(generic.clone());
+                preset.non_file_tools.as_mut()?.push(generic);
+                Some(preset)
+            }
+            "playwright" => {
+                let reads: Vec<String> = [
+                    "browser_navigate",
+                    "browser_navigate_back",
+                    "browser_snapshot",
+                    "browser_tabs",
+                    "browser_wait_for",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+                let writes: Vec<String> = [
+                    "browser_evaluate",
+                    "browser_run_code",
+                    "browser_file_upload",
+                    "browser_download",
+                    "browser_take_screenshot",
+                    "browser_click",
+                    "browser_type",
+                    "browser_fill_form",
+                    "browser_press_key",
+                    "browser_drag",
+                    "browser_select_option",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+                let non_file = reads.iter().chain(&writes).cloned().collect();
+                Some(PresetConfig {
+                    always_allow_tools: Some(reads),
+                    custom_modifying_tools: Some(writes),
+                    non_file_tools: Some(non_file),
+                    ..PresetConfig::default()
+                })
+            }
             _ => None,
         }
     }
@@ -438,7 +502,7 @@ impl PolicyConfig {
             .or_else(|| Self::get_builtin_preset(name))
             .ok_or_else(|| {
                 MoatError::PolicyViolation(format!(
-                    "Unknown preset '{}'. Available built-in presets: filesystem, git, fetch, sqlite, memory",
+                    "Unknown preset '{}'. Available built-in presets: filesystem, git, fetch, sqlite, memory, postgres, playwright",
                     name
                 ))
             })?;
@@ -739,7 +803,10 @@ impl PolicyEngine {
         }
 
         // 4. Dangerous write actions in read-only mode
-        let is_write = self.is_modifying_tool(tool_name);
+        // A browser snapshot can optionally write a file. Its path has already passed the jail.
+        let snapshot_output =
+            tool_name.eq_ignore_ascii_case("browser_snapshot") && !extracted_paths.is_empty();
+        let is_write = self.is_modifying_tool(tool_name) || snapshot_output;
         if is_write && self.config.read_only {
             return Decision::Block(format!(
                 "Read-only policy active: modifying tool '{}' is prohibited",
@@ -774,7 +841,7 @@ impl PolicyEngine {
             }
 
             for re in &self.compiled_blocked_regexes {
-                if re.is_match(cmd_str) {
+                if command_matches_regex(cmd_str, re) {
                     return Decision::Block(format!(
                         "Prohibited destructive command detected: matches pattern '{}'",
                         re.as_str()
@@ -817,7 +884,7 @@ impl PolicyEngine {
                 }
             }
 
-            if self.config.require_approval_on_write || !authorized {
+            if self.config.require_approval_on_write || !authorized || snapshot_output {
                 return Decision::AskOperator {
                     tool_name: tool_name.to_string(),
                     target_path,
@@ -834,6 +901,7 @@ impl PolicyEngine {
     pub fn validate_path_secure(&self, raw_path: &str) -> Result<PathBuf> {
         // Step 1: Lexical Fast-Fail Checks (Zero I/O, prevents Windows NTLM Coercion)
         validate_lexical_syntax(raw_path)?;
+        validate_path_segments(raw_path)?;
 
         let candidate = Path::new(raw_path);
         let absolute_target = if candidate.is_absolute() {
@@ -844,57 +912,78 @@ impl PolicyEngine {
                 .unwrap_or_else(|_| candidate.to_path_buf())
         };
 
-        // Step 2: Component-by-component traversal to defeat symlink escapes to non-existent files
+        // Step 2: Resolve every existing component, then retain the deepest existing ancestor
+        // for a new destination. This supports a/b/c where a does not exist yet.
+        let components: Vec<_> = absolute_target.components().collect();
         let mut verified_prefix = PathBuf::new();
-        for component in absolute_target.components() {
+        let mut missing_segments = Vec::new();
+        let mut missing_started = false;
+        for (index, component) in components.iter().enumerate() {
             match component {
                 Component::Prefix(p) => verified_prefix.push(p.as_os_str()),
                 Component::RootDir => verified_prefix.push(Component::RootDir.as_os_str()),
                 Component::Normal(segment) => {
+                    if missing_started {
+                        missing_segments.push(segment.to_os_string());
+                        continue;
+                    }
                     verified_prefix.push(segment);
 
+                    let has_descendants = components[index + 1..]
+                        .iter()
+                        .any(|c| matches!(c, Component::Normal(_)));
+
                     // If component exists, inspect metadata without following symlinks
-                    if let Ok(meta) = std::fs::symlink_metadata(&verified_prefix) {
-                        if meta.file_type().is_symlink() {
-                            // Resolve symlink target immediately and ensure it remains inside boundary
-                            let target = std::fs::read_link(&verified_prefix)?;
-                            let resolved = if target.is_absolute() {
-                                target
-                            } else {
-                                verified_prefix
-                                    .parent()
-                                    .unwrap_or(Path::new("."))
-                                    .join(target)
-                            };
+                    match std::fs::symlink_metadata(&verified_prefix) {
+                        Ok(meta) => {
+                            if meta.file_type().is_symlink() {
+                                // Resolve symlink target immediately and ensure it remains inside boundary.
+                                let target = std::fs::read_link(&verified_prefix)?;
+                                let resolved = if target.is_absolute() {
+                                    target
+                                } else {
+                                    verified_prefix
+                                        .parent()
+                                        .unwrap_or(Path::new("."))
+                                        .join(target)
+                                };
 
-                            let canonical_target = resolved.canonicalize()?;
-                            if !self.is_within_allowed_roots(&canonical_target) {
-                                return Err(MoatError::PathBoundaryViolation {
-                                    attempted: canonical_target.display().to_string(),
-                                    allowed: self.allowed_roots_summary(),
-                                });
+                                let canonical_target = resolved.canonicalize()?;
+                                if !self.is_within_allowed_roots(&canonical_target) {
+                                    return Err(MoatError::PathBoundaryViolation {
+                                        attempted: canonical_target.display().to_string(),
+                                        allowed: self.allowed_roots_summary(),
+                                    });
+                                }
+                                if has_descendants && !canonical_target.is_dir() {
+                                    return Err(MoatError::PolicyViolation(
+                                        "A path ancestor is not a directory".to_string(),
+                                    ));
+                                }
+                                verified_prefix = canonical_target;
+                            } else if has_descendants && !meta.is_dir() {
+                                return Err(MoatError::PolicyViolation(
+                                    "A path ancestor is not a directory".to_string(),
+                                ));
                             }
-                            verified_prefix = canonical_target;
-                        }
 
-                        // Hardlink Inode Check: If file has multiple links, reject
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::MetadataExt;
-                            if meta.is_file() && meta.nlink() > 1 {
-                                return Err(MoatError::PolicyViolation(format!(
-                                    "Hardlink Inode-Aliasing detected on '{}' (nlink = {}). Access denied.",
-                                    verified_prefix.display(),
-                                    meta.nlink()
-                                )));
+                            // Hardlink check: fail closed if the platform cannot report links.
+                            if meta.is_file() && !meta.file_type().is_symlink() {
+                                let links = hardlink_count(&verified_prefix)?;
+                                if links > 1 {
+                                    return Err(MoatError::PolicyViolation(format!(
+                                        "Hardlink alias detected on '{}' (link count = {links}). Access denied.",
+                                        verified_prefix.display()
+                                    )));
+                                }
                             }
                         }
-
-                        #[cfg(windows)]
-                        {
-                            // Note: std::os::windows::fs::MetadataExt::number_of_links is nightly-only (feature windows_by_handle)
-                            // On Windows without unstable features, symlink and reparse point checks above handle link protection
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            missing_started = true;
+                            verified_prefix.pop();
+                            missing_segments.push(segment.to_os_string());
                         }
+                        Err(error) => return Err(error.into()),
                     }
                 }
                 Component::CurDir => {
@@ -909,16 +998,20 @@ impl PolicyEngine {
             }
         }
 
-        // Step 3: Final canonical check if destination exists or canonical ancestor check
-        let final_canonical = match absolute_target.canonicalize() {
-            Ok(c) => c,
-            Err(_) => {
-                // For non-existent files (e.g. write_file), canonicalize verified parent
-                let parent = absolute_target.parent().unwrap_or(Path::new("."));
-                let canonical_parent = parent.canonicalize()?;
-                let file_name = absolute_target.file_name().unwrap_or_default();
-                canonical_parent.join(file_name)
+        // Step 3: Canonicalize the destination, or the deepest existing ancestor for a new path.
+        let final_canonical = if missing_started {
+            let canonical_ancestor = verified_prefix.canonicalize()?;
+            if !self.is_within_allowed_roots(&canonical_ancestor) {
+                return Err(MoatError::PathBoundaryViolation {
+                    attempted: canonical_ancestor.display().to_string(),
+                    allowed: self.allowed_roots_summary(),
+                });
             }
+            missing_segments
+                .into_iter()
+                .fold(canonical_ancestor, |path, segment| path.join(segment))
+        } else {
+            absolute_target.canonicalize()?
         };
 
         if !self.is_within_allowed_roots(&final_canonical) {
@@ -926,6 +1019,14 @@ impl PolicyEngine {
                 attempted: final_canonical.display().to_string(),
                 allowed: self.allowed_roots_summary(),
             });
+        }
+
+        // A symlink may resolve to a multiply-linked file inside the jail.
+        // Check the resolved target as well as the lexical path components.
+        if !missing_started && final_canonical.is_file() && hardlink_count(&final_canonical)? > 1 {
+            return Err(MoatError::PolicyViolation(
+                "Hardlink alias detected on resolved target. Access denied.".to_string(),
+            ));
         }
 
         Ok(final_canonical)
@@ -981,6 +1082,41 @@ impl PolicyEngine {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+fn validate_path_segments(raw_path: &str) -> Result<()> {
+    for component in Path::new(raw_path).components() {
+        if let Component::Normal(segment) = component {
+            let text = segment.to_str().ok_or_else(|| {
+                MoatError::PolicyViolation("Path contains a non-UTF-8 segment".to_string())
+            })?;
+            validate_lexical_syntax(text)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn hardlink_count(path: &Path) -> Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(std::fs::metadata(path)?.nlink())
+}
+
+#[cfg(windows)]
+fn hardlink_count(path: &Path) -> Result<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let file = std::fs::File::open(path)?;
+    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // The File owns the handle for the full duration of this call.
+    let succeeded = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+    if succeeded == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(u64::from(information.nNumberOfLinks))
 }
 
 /// Compares two paths after resolving them as far as possible. Existing files are
@@ -1938,12 +2074,13 @@ const POSIX_SHORT_FLAG_TOOLS: &[&str] = &[
     "tar", "touch", "tr", "umount", "uniq", "wc", "xargs",
 ];
 
-/// Tokenizes a shell command line into words, honoring single/double quotes.
+/// Splits a shell command into segments and words, honoring single/double quotes.
 /// Backslashes are only treated as escapes for whitespace and quote characters
 /// so that Windows paths such as `C:\Windows\System32` remain intact.
-fn tokenize_shell_command(input: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
+fn tokenize_command_segments(input: &str) -> Vec<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut words = Vec::new();
+    let mut word = String::new();
     let mut quote: Option<char> = None;
     let mut chars = input.chars().peekable();
 
@@ -1951,66 +2088,40 @@ fn tokenize_shell_command(input: &str) -> Vec<String> {
         if ch == '\\' && quote != Some('\'') {
             match chars.peek().copied() {
                 Some(next) if next.is_whitespace() || next == '"' || next == '\'' => {
-                    current.push(next);
+                    word.push(next);
                     chars.next();
                 }
-                _ => current.push('\\'),
+                _ => word.push('\\'),
             }
             continue;
         }
 
         match quote {
             Some(q) if ch == q => quote = None,
-            Some(_) => current.push(ch),
+            Some(_) => word.push(ch),
             None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if SHELL_SEPARATORS.contains(&ch) => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+                if !words.is_empty() {
+                    segments.push(std::mem::take(&mut words));
+                }
+            }
             None if ch.is_whitespace() => {
-                if !current.is_empty() {
-                    tokens.push(std::mem::take(&mut current));
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
                 }
             }
-            None => current.push(ch),
+            None => word.push(ch),
         }
     }
 
-    if !current.is_empty() {
-        tokens.push(current);
+    if !word.is_empty() {
+        words.push(word);
     }
-
-    tokens
-}
-
-/// Splits tokens into shell command segments at operators such as `;`, `&&`,
-/// and `|`. This keeps a destructive program from being matched against an
-/// argument of a later command (e.g. `rm -rf /tmp && echo /`).
-fn split_into_command_segments(tokens: &[String]) -> Vec<Vec<String>> {
-    let mut segments = Vec::new();
-    let mut current = Vec::new();
-
-    for token in tokens {
-        let mut remainder = token.as_str();
-        loop {
-            match remainder.find(|c| SHELL_SEPARATORS.contains(&c)) {
-                Some(idx) => {
-                    if idx > 0 {
-                        current.push(remainder[..idx].to_string());
-                    }
-                    if !current.is_empty() {
-                        segments.push(std::mem::take(&mut current));
-                    }
-                    remainder = &remainder[idx + 1..];
-                }
-                None => {
-                    if !remainder.is_empty() {
-                        current.push(remainder.to_string());
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    if !current.is_empty() {
-        segments.push(current);
+    if !words.is_empty() {
+        segments.push(words);
     }
 
     segments
@@ -2127,6 +2238,86 @@ fn contains_contiguous(haystack: &[String], needle: &[String]) -> bool {
         .any(|window| window == needle)
 }
 
+const MAX_COMMAND_ANALYSIS_DEPTH: usize = 16;
+const MAX_COMMAND_ANALYSIS_NODES: usize = 256;
+const MAX_COMMAND_ANALYSIS_BYTES: usize = 64 * 1024;
+
+fn is_nested_command_candidate(word: &str, command: &str) -> bool {
+    word.len() < command.len()
+        && word
+            .chars()
+            .any(|ch| ch.is_whitespace() || SHELL_SEPARATORS.contains(&ch))
+}
+
+/// Applies configured regex rules to the command and bounded candidate
+/// commands inside wrappers, quoted scripts, and shell segments. Exhausting
+/// any analysis limit blocks the command, so deeply nested input cannot skip
+/// a destructive-command rule.
+fn command_matches_regex(cmd: &str, re: &regex::Regex) -> bool {
+    let wrapper_names = [
+        "sh",
+        "bash",
+        "zsh",
+        "cmd",
+        "powershell",
+        "pwsh",
+        "env",
+        "nohup",
+        "nice",
+        "timeout",
+        "xargs",
+    ];
+    let wrapper_mentions = cmd
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+        .filter(|word| wrapper_names.contains(&word.to_ascii_lowercase().as_str()))
+        .count();
+    if wrapper_mentions >= MAX_COMMAND_ANALYSIS_DEPTH {
+        return true;
+    }
+
+    fn analyze(cmd: &str, re: &regex::Regex, depth: usize, budget: &mut usize) -> bool {
+        if depth >= MAX_COMMAND_ANALYSIS_DEPTH || *budget == 0 {
+            return true;
+        }
+        *budget -= 1;
+
+        if cmd.len() > MAX_COMMAND_ANALYSIS_BYTES {
+            return true;
+        }
+        if re.is_match(cmd) {
+            return true;
+        }
+
+        let segments = tokenize_command_segments(cmd);
+        for segment in &segments {
+            for start in 0..segment.len() {
+                if *budget == 0 {
+                    return true;
+                }
+                *budget -= 1;
+                let candidate = segment[start..].join(" ");
+                if re.is_match(&candidate) {
+                    return true;
+                }
+            }
+        }
+
+        for token in segments
+            .iter()
+            .flatten()
+            .filter(|token| is_nested_command_candidate(token, cmd))
+        {
+            if analyze(token, re, depth + 1, budget) {
+                return true;
+            }
+        }
+        false
+    }
+
+    let mut budget = MAX_COMMAND_ANALYSIS_NODES;
+    analyze(cmd, re, 0, &mut budget)
+}
+
 /// Matches a command line against a configured blocked-command rule using
 /// tokenization instead of raw substring matching. This prevents whitespace
 /// and path-prefix bypasses while avoiding false blocks for non-root targets
@@ -2137,24 +2328,35 @@ fn command_matches_blocked(cmd: &str, blocked: &str) -> bool {
         return false;
     }
 
+    let mut budget = MAX_COMMAND_ANALYSIS_NODES;
+    match_blocked_command(cmd, blocked, 0, &mut budget)
+}
+
+fn match_blocked_command(cmd: &str, blocked: &str, depth: usize, budget: &mut usize) -> bool {
+    if depth >= MAX_COMMAND_ANALYSIS_DEPTH || *budget == 0 || cmd.len() > MAX_COMMAND_ANALYSIS_BYTES
+    {
+        return true;
+    }
+    *budget -= 1;
+
     // Shell constructs (e.g. fork bombs) cannot be matched reliably token by
     // token, so compare them after removing all whitespace.
     if blocked.chars().any(|c| SHELL_SEPARATORS.contains(&c)) {
         return normalize_whitespace_lower(cmd).contains(&normalize_whitespace_lower(blocked));
     }
 
-    let cmd_tokens = tokenize_shell_command(cmd);
-    let blocked_tokens = tokenize_shell_command(blocked);
-    if blocked_tokens.is_empty() {
+    let segments = tokenize_command_segments(cmd);
+    let blocked_segments = tokenize_command_segments(blocked);
+    let Some(blocked_tokens) = blocked_segments.first() else {
         return false;
-    }
+    };
 
     // Quoted or script payloads (e.g. `python -c "rm -rf /"`) are tokenized
     // recursively so a destructive command hidden inside a string is still
-    // detected. Quotes are stripped before recursion, so the input shrinks and
-    // the recursion terminates.
-    if cmd_tokens.iter().any(|token| {
-        token.chars().any(char::is_whitespace) && command_matches_blocked(token, blocked)
+    // detected. The input must shrink and remain within the analysis budget.
+    if segments.iter().flatten().any(|token| {
+        is_nested_command_candidate(token, cmd)
+            && match_blocked_command(token, blocked, depth + 1, budget)
     }) {
         return true;
     }
@@ -2163,7 +2365,7 @@ fn command_matches_blocked(cmd: &str, blocked: &str) -> bool {
     // pipeline (including wrappers like sudo) and versioned names (mkfs.ext4).
     if blocked_tokens.len() == 1 {
         let target = normalize_program_token(&blocked_tokens[0]);
-        return cmd_tokens.iter().any(|token| {
+        return segments.iter().flatten().any(|token| {
             let normalized = normalize_program_token(token);
             normalized == target || normalized.starts_with(&format!("{target}."))
         });
@@ -2173,7 +2375,7 @@ fn command_matches_blocked(cmd: &str, blocked: &str) -> bool {
     let blocked_rest = expand_short_flags(&blocked_program, &blocked_tokens[1..]);
     let (blocked_flags, blocked_args) = split_flags_and_args(&blocked_program, &blocked_rest);
 
-    for segment in split_into_command_segments(&cmd_tokens) {
+    for segment in segments {
         for (start, token) in segment.iter().enumerate() {
             if normalize_program_token(token) != blocked_program {
                 continue;
@@ -2304,6 +2506,42 @@ mod command_matcher_tests {
         assert!(command_matches_blocked(":(){ :|:& };:", ":(){ :|:& };:"));
         assert!(command_matches_blocked(":(){ :|:&};:", ":(){ :|:& };:"));
         assert!(!command_matches_blocked("echo fork bomb", ":(){ :|:& };:"));
+    }
+
+    #[test]
+    fn unquoted_newlines_separate_command_segments() {
+        let command = "printf first\nprintf second\r\nprintf third";
+        assert_eq!(
+            tokenize_command_segments(command),
+            [
+                ["printf", "first"],
+                ["printf", "second"],
+                ["printf", "third"],
+            ]
+        );
+        assert!(!command_matches_regex(
+            command,
+            &regex::Regex::new(r"^printf fourth$").unwrap()
+        ));
+    }
+
+    #[test]
+    fn quoted_separators_stay_inside_arguments() {
+        assert_eq!(
+            tokenize_command_segments("printf 'left;right' && printf \"up|down\""),
+            [["printf", "left;right"], ["printf", "up|down"]],
+        );
+    }
+
+    #[test]
+    fn literal_command_analysis_fails_closed_at_its_limit() {
+        let rule = "printf restricted";
+        assert!(!command_matches_blocked(r#"sh -c "printf ordinary""#, rule));
+
+        // The tokenizer consumes one backslash before the space on each recursive pass.
+        let escapes = "\\".repeat(MAX_COMMAND_ANALYSIS_DEPTH);
+        let command = format!("printf ordinary{escapes} text");
+        assert!(command_matches_blocked(&command, rule));
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 use tracing::{debug, error, info, warn};
@@ -131,6 +132,12 @@ fn get_exit_code(status: std::process::ExitStatus) -> i32 {
     }
 }
 
+async fn cancel_approval_tasks(tasks: &Mutex<JoinSet<()>>) {
+    let mut tasks = tasks.lock().await;
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+}
+
 type BoxedAsyncRead = Box<dyn AsyncRead + Unpin + Send>;
 type BoxedAsyncWrite = Box<dyn AsyncWrite + Unpin + Send>;
 
@@ -141,7 +148,6 @@ pub struct ProxyServer {
     /// True when approval prompts were disabled on purpose (`--no-prompt`).
     no_prompt: bool,
     session_cache: Arc<Mutex<SessionApprovalCache>>,
-    audit_chain: Arc<std::sync::Mutex<AuditChain>>,
     audit_path: Option<PathBuf>,
     audit_level: AuditLevel,
     audit_write_lock: Arc<std::sync::Mutex<()>>,
@@ -162,7 +168,6 @@ impl ProxyServer {
 
         let audit_path = policy.config().audit_log.clone();
         let audit_level = policy.config().audit_level;
-        let session_id = crate::new_session_id("sess");
 
         Self {
             dlp: Arc::new(
@@ -172,7 +177,6 @@ impl ProxyServer {
             console: Arc::new(Mutex::new(console)),
             no_prompt: false,
             session_cache: Arc::new(Mutex::new(SessionApprovalCache::new())),
-            audit_chain: Arc::new(std::sync::Mutex::new(AuditChain::new(session_id))),
             audit_path,
             audit_level,
             audit_write_lock: Arc::new(std::sync::Mutex::new(())),
@@ -185,7 +189,6 @@ impl ProxyServer {
     pub fn with_console(policy: PolicyEngine, console: Option<DirectConsole>) -> Self {
         let audit_path = policy.config().audit_log.clone();
         let audit_level = policy.config().audit_level;
-        let session_id = crate::new_session_id("sess");
         // Passing no console here is the explicit `--no-prompt` mode.
         let no_prompt = console.is_none();
 
@@ -197,7 +200,6 @@ impl ProxyServer {
             console: Arc::new(Mutex::new(console)),
             no_prompt,
             session_cache: Arc::new(Mutex::new(SessionApprovalCache::new())),
-            audit_chain: Arc::new(std::sync::Mutex::new(AuditChain::new(session_id))),
             audit_path,
             audit_level,
             audit_write_lock: Arc::new(std::sync::Mutex::new(())),
@@ -268,6 +270,10 @@ impl ProxyServer {
         W: AsyncWrite + Unpin + Send + 'static,
         E: AsyncWrite + Unpin + Send + 'static,
     {
+        let audit_key = std::env::var_os("MOAT_AUDIT_KEY");
+        if audit_key.as_ref().is_some_and(|v| v.is_empty()) {
+            anyhow::bail!("MOAT_AUDIT_KEY must not be empty");
+        }
         info!(
             "Spawning protected MCP server: {} ({} arguments)",
             command,
@@ -276,13 +282,25 @@ impl ProxyServer {
 
         let executable = crate::command::resolve_command(command.as_ref())
             .map_err(|e| anyhow::anyhow!("Failed to spawn wrapped command '{}': {}", command, e))?;
-        let mut child = Command::new(executable)
+        let mut child_command = Command::new(executable);
+        mcp_moat_core::child_env::configure_child(child_command.as_std_mut(), self.policy.config());
+        #[cfg(windows)]
+        crate::process::prepare(&mut child_command);
+        let mut child = child_command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn wrapped command '{}': {}", command, e))?;
+        #[cfg(windows)]
+        let _child_job = match crate::process::attach_and_resume(&mut child) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = child.wait().await;
+                return Err(error.into());
+            }
+        };
 
         let (child_stdin, child_stdout, child_stderr) =
             match require_child_pipes(child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -335,7 +353,10 @@ impl ProxyServer {
         let audit_failed = Arc::new(AtomicBool::new(false));
         let log_event = {
             let audit_path = self.audit_path.clone();
-            let chain_ref = Arc::clone(&self.audit_chain);
+            let chain_ref = std::sync::Mutex::new(AuditChain::with_key(
+                crate::new_session_id("sess"),
+                audit_key.map(std::ffi::OsString::into_encoded_bytes),
+            ));
             let write_lock = Arc::clone(&self.audit_write_lock);
             let audit_level = self.audit_level;
             let dlp_ref = Arc::clone(&self.dlp);
@@ -351,7 +372,6 @@ impl ProxyServer {
                       raw_payload: Option<String>,
                       dlp_redactions: Option<usize>| {
                     let audit_path = audit_path.clone();
-                    let chain_ref = Arc::clone(&chain_ref);
                     let write_lock = Arc::clone(&write_lock);
                     let dlp_ref = Arc::clone(&dlp_ref);
                     let Some(path) = audit_path else {
@@ -361,15 +381,17 @@ impl ProxyServer {
                         return false;
                     }
 
-                    let should_log = match audit_level {
-                        AuditLevel::Full => true,
-                        AuditLevel::DecisionsOnly => decision.is_some(),
-                        AuditLevel::ViolationsOnly => {
-                            decision.as_ref().map(|d| d.is_violation()).unwrap_or(false)
-                                || operator_decision.as_deref() == Some("Deny")
-                                || dlp_redactions.unwrap_or(0) > 0
-                        }
-                    };
+                    let should_log = method == "session_end"
+                        && direction == AuditDirection::Internal
+                        || match audit_level {
+                            AuditLevel::Full => true,
+                            AuditLevel::DecisionsOnly => decision.is_some(),
+                            AuditLevel::ViolationsOnly => {
+                                decision.as_ref().map(|d| d.is_violation()).unwrap_or(false)
+                                    || operator_decision.as_deref() == Some("Deny")
+                                    || dlp_redactions.unwrap_or(0) > 0
+                            }
+                        };
 
                     if !should_log {
                         return true;
@@ -478,6 +500,8 @@ impl ProxyServer {
         let log_inbound = log_event.clone();
         let has_audit = self.audit_path.is_some();
         let audit_failed_for_inbound = Arc::clone(&audit_failed);
+        let approval_tasks = Arc::new(Mutex::new(JoinSet::new()));
+        let approval_tasks_inbound = Arc::clone(&approval_tasks);
 
         let inbound_handle = tokio::spawn(async move {
             let mut framed_in =
@@ -488,6 +512,10 @@ impl ProxyServer {
             let audit_ok = move || !audit_ok_flag.load(Ordering::Acquire);
 
             while let Some(line_res) = framed_in.next().await {
+                {
+                    let mut tasks = approval_tasks_inbound.lock().await;
+                    while tasks.try_join_next().is_some() {}
+                }
                 match line_res {
                     Ok(line) => {
                         let trimmed = line.trim();
@@ -867,11 +895,38 @@ impl ProxyServer {
                                         .map(|p| policy.is_protected_target(p))
                                         .unwrap_or(false)
                                         || action_summary.contains("protected configuration");
+                                    let is_require_approval_write =
+                                        (policy.config().require_approval_on_write
+                                            && policy.is_modifying_tool(&tool_name))
+                                            || (tool_name.eq_ignore_ascii_case("browser_snapshot")
+                                                && target_path.is_some());
+                                    let cached_action = format!("{tool_name}\0{action_summary}");
+                                    let canonical_write_targets = if is_require_approval_write {
+                                        let raw_targets =
+                                            policy.extract_all_path_arguments(&tool_call);
+                                        raw_targets
+                                            .iter()
+                                            .map(|path| policy.validate_path_secure(path))
+                                            .collect::<Result<Vec<_>, _>>()
+                                            .unwrap_or_default()
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    let write_cache_key = if is_cmd {
+                                        cached_action.clone()
+                                    } else {
+                                        tool_name.clone()
+                                    };
 
                                     let is_already_approved = {
                                         let cache = session_cache.lock().await;
-                                        if is_protected_target || is_cmd {
-                                            cache.is_action_allowed(&action_summary)
+                                        if is_require_approval_write {
+                                            cache.is_write_target_set_allowed(
+                                                &write_cache_key,
+                                                &canonical_write_targets,
+                                            )
+                                        } else if is_cmd || is_protected_target {
+                                            cache.is_action_allowed(&cached_action)
                                         } else {
                                             cache.is_allowed(&tool_name, Some(&action_summary))
                                         }
@@ -933,6 +988,10 @@ impl ProxyServer {
                                     let target_path_str =
                                         target_path.as_ref().map(|p| p.display().to_string());
                                     let action_summary_clone = action_summary.clone();
+                                    let cached_action_for_prompt = cached_action.clone();
+                                    let write_cache_key_for_prompt = write_cache_key.clone();
+                                    let canonical_write_targets_for_prompt =
+                                        canonical_write_targets.clone();
                                     let log_approval = log_inbound.clone();
                                     let audit_failed_for_approval =
                                         Arc::clone(&audit_failed_for_inbound);
@@ -942,7 +1001,7 @@ impl ProxyServer {
                                         None
                                     };
 
-                                    tokio::spawn(async move {
+                                    approval_tasks_inbound.lock().await.spawn(async move {
                                         let session_cache_for_prompt =
                                             Arc::clone(&session_cache_ref);
                                         let tool_name_for_prompt = tool_name_cloned.clone();
@@ -966,9 +1025,14 @@ impl ProxyServer {
                                             {
                                                 let cache =
                                                     session_cache_for_prompt.blocking_lock();
-                                                let allowed = if is_protected_target || is_cmd {
+                                                let allowed = if is_require_approval_write {
+                                                    cache.is_write_target_set_allowed(
+                                                        &write_cache_key_for_prompt,
+                                                        &canonical_write_targets_for_prompt,
+                                                    )
+                                                } else if is_cmd || is_protected_target {
                                                     cache.is_action_allowed(
-                                                        &action_summary_for_prompt,
+                                                        &cached_action_for_prompt,
                                                     )
                                                 } else {
                                                     cache.is_allowed(
@@ -1044,8 +1108,13 @@ impl ProxyServer {
                                             ApprovalDecision::AllowAlways => {
                                                 {
                                                     let mut cache = session_cache_ref.lock().await;
-                                                    if is_cmd || is_protected_target {
-                                                        cache.allow_action(&action_summary);
+                                                    if is_require_approval_write {
+                                                        cache.allow_write_target_set(
+                                                            &write_cache_key,
+                                                            &canonical_write_targets,
+                                                        );
+                                                    } else if is_cmd || is_protected_target {
+                                                        cache.allow_action(&cached_action);
                                                     } else {
                                                         cache.allow_always(
                                                             &tool_name_cloned,
@@ -1431,6 +1500,7 @@ impl ProxyServer {
                     }
                 }
             }
+            cancel_approval_tasks(&approval_tasks_inbound).await;
         });
 
         // Task 2: Outbound stream (Child MCP server stdout -> Client stdout) with AST-DLP Sanitization & Token Optimization
@@ -1592,44 +1662,53 @@ impl ProxyServer {
 
         // Lifecycle management: wait for client input closure, child exit, or broken client stdout
         let mut inbound_handle = inbound_handle;
+        let mut child_stdin_handle = child_stdin_handle;
         let mut outbound_handle = outbound_handle;
+        let mut stderr_handle = stderr_handle;
+        let mut complete = true;
+        let mut inbound_joined = false;
         let exit_code = tokio::select! {
             status_res = child.wait() => {
                 let status = status_res?;
                 inbound_handle.abort();
                 child_stdin_handle.abort();
-                let _ = tokio::time::timeout(Duration::from_millis(500), async {
-                    let _ = outbound_handle.await;
-                    let _ = stderr_handle.await;
-                }).await;
+                if !matches!(tokio::time::timeout(Duration::from_millis(500), &mut outbound_handle).await, Ok(Ok(()))) { outbound_handle.abort(); complete = false; }
+                if !matches!(tokio::time::timeout(Duration::from_millis(500), &mut stderr_handle).await, Ok(Ok(()))) { stderr_handle.abort(); complete = false; }
                 get_exit_code(status)
             }
-            _ = &mut inbound_handle => {
+            inbound_result = &mut inbound_handle => {
+                inbound_joined = true;
+                if inbound_result.is_err() { complete = false; }
                 // Inbound stream finished (client closed stdin)
                 // Drop writer senders so child_stdin writer task finishes and closes child stdin
                 drop(priority_tx);
                 drop(normal_tx);
-                let _ = child_stdin_handle.await;
-                let exit_code = match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
+                let graceful_shutdown = async {
+                    if (&mut child_stdin_handle).await.is_err() { complete = false; }
+                    child.wait().await
+                };
+                let exit_code = match tokio::time::timeout(Duration::from_secs(3), graceful_shutdown).await {
                     Ok(Ok(status)) => get_exit_code(status),
                     Ok(Err(e)) => {
+                        complete = false;
                         error!("Error waiting for child exit: {}", e);
                         1
                     }
                     Err(_) => {
+                        complete = false;
+                        child_stdin_handle.abort();
                         warn!("Child MCP server did not exit within 3s grace period; killing child process");
                         let _ = child.kill().await;
                         let _ = child.wait().await;
                         1
                     }
                 };
-                let _ = tokio::time::timeout(Duration::from_millis(500), async {
-                    let _ = outbound_handle.await;
-                    let _ = stderr_handle.await;
-                }).await;
+                if !matches!(tokio::time::timeout(Duration::from_millis(500), &mut outbound_handle).await, Ok(Ok(()))) { outbound_handle.abort(); complete = false; }
+                if !matches!(tokio::time::timeout(Duration::from_millis(500), &mut stderr_handle).await, Ok(Ok(()))) { stderr_handle.abort(); complete = false; }
                 exit_code
             }
-            _ = &mut outbound_handle => {
+            outbound_result = &mut outbound_handle => {
+                if outbound_result.is_err() { complete = false; }
                 // Outbound stream ended (child stdout closed or client stdout failed)
                 // Wait with a 3s grace period for child process to exit and propagate exit code
                 inbound_handle.abort();
@@ -1637,39 +1716,65 @@ impl ProxyServer {
                 let exit_code = match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
                     Ok(Ok(status)) => get_exit_code(status),
                     Ok(Err(e)) => {
+                        complete = false;
                         error!("Error waiting for child exit: {}", e);
                         1
                     }
                     Err(_) => {
+                        complete = false;
                         warn!("Child MCP server did not exit within 3s grace period; killing child process");
                         let _ = child.kill().await;
                         let _ = child.wait().await;
                         1
                     }
                 };
-                let _ = tokio::time::timeout(Duration::from_millis(500), stderr_handle).await;
+                if !matches!(tokio::time::timeout(Duration::from_millis(500), &mut stderr_handle).await, Ok(Ok(()))) { stderr_handle.abort(); complete = false; }
                 exit_code
             }
             _ = tokio::signal::ctrl_c() => {
+                complete = false;
+                outbound_handle.abort();
                 warn!("Received SIGINT/Ctrl+C; terminating child MCP server cleanly");
                 inbound_handle.abort();
                 child_stdin_handle.abort();
                 let _ = child.kill().await;
                 let _ = child.wait().await;
-                let _ = tokio::time::timeout(Duration::from_millis(500), stderr_handle).await;
+                if !matches!(tokio::time::timeout(Duration::from_millis(500), &mut stderr_handle).await, Ok(Ok(()))) { stderr_handle.abort(); complete = false; }
                 130
             }
             _ = crate::wait_for_sigterm() => {
+                complete = false;
+                outbound_handle.abort();
                 warn!("Received SIGTERM; terminating child MCP server cleanly");
                 inbound_handle.abort();
                 child_stdin_handle.abort();
                 let _ = child.kill().await;
                 let _ = child.wait().await;
-                let _ = tokio::time::timeout(Duration::from_millis(500), stderr_handle).await;
+                if !matches!(tokio::time::timeout(Duration::from_millis(500), &mut stderr_handle).await, Ok(Ok(()))) { stderr_handle.abort(); complete = false; }
                 143
             }
         };
 
+        if !inbound_joined {
+            inbound_handle.abort();
+            let _ = inbound_handle.await;
+        }
+        cancel_approval_tasks(&approval_tasks).await;
+
+        if complete
+            && !log_event(
+                AuditDirection::Internal,
+                "session_end".into(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        {
+            return Err(anyhow::anyhow!("Audit session end could not be written"));
+        }
         Ok(exit_code)
     }
 }
@@ -1700,6 +1805,29 @@ mod hardening_tests {
     #[test]
     fn all_child_pipes_present_is_ok() {
         assert!(require_child_pipes(Some(1u8), Some(2u8), Some(3u8)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelled_approval_tasks_cannot_run_post_prompt_effects() {
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed_in_task = Arc::clone(&completed);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let tasks = Mutex::new(JoinSet::new());
+        tasks.lock().await.spawn(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+            completed_in_task.store(true, Ordering::Release);
+        });
+        started_rx.await.unwrap();
+
+        tokio::time::timeout(Duration::from_millis(100), cancel_approval_tasks(&tasks))
+            .await
+            .expect("approval task cancellation must not wait for the prompt");
+        assert!(
+            tasks.lock().await.is_empty(),
+            "cancelled approval task must be joined"
+        );
+        assert!(!completed.load(Ordering::Acquire));
     }
 
     #[test]

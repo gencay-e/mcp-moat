@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalDecision {
@@ -13,6 +14,7 @@ pub enum ApprovalDecision {
 pub struct SessionApprovalCache {
     allowed_tools: HashSet<String>,
     allowed_actions: HashSet<String>,
+    allowed_write_target_sets: HashSet<(String, Vec<PathBuf>)>,
 }
 
 impl SessionApprovalCache {
@@ -71,6 +73,35 @@ impl SessionApprovalCache {
 
     pub fn is_action_allowed(&self, action_summary: &str) -> bool {
         self.allowed_actions.contains(action_summary)
+    }
+
+    /// Checks a write approval against the complete set of canonical target paths.
+    /// Empty target sets are never persistently approved.
+    pub fn is_write_target_set_allowed(
+        &self,
+        tool_name: &str,
+        canonical_targets: &[PathBuf],
+    ) -> bool {
+        let Some(targets) = normalize_target_set(canonical_targets) else {
+            return false;
+        };
+        self.allowed_write_target_sets
+            .contains(&(tool_name.to_string(), targets))
+    }
+
+    /// Stores a write approval for one tool and its complete canonical target set.
+    /// Returns false when there is no target to bind the approval to.
+    pub fn allow_write_target_set(
+        &mut self,
+        tool_name: &str,
+        canonical_targets: &[PathBuf],
+    ) -> bool {
+        let Some(targets) = normalize_target_set(canonical_targets) else {
+            return false;
+        };
+        self.allowed_write_target_sets
+            .insert((tool_name.to_string(), targets));
+        true
     }
 
     pub fn is_allowed(&self, tool_name: &str, action_summary: Option<&str>) -> bool {
@@ -133,7 +164,18 @@ impl SessionApprovalCache {
     pub fn clear(&mut self) {
         self.allowed_tools.clear();
         self.allowed_actions.clear();
+        self.allowed_write_target_sets.clear();
     }
+}
+
+fn normalize_target_set(targets: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    if targets.is_empty() {
+        return None;
+    }
+    let mut normalized = targets.to_vec();
+    normalized.sort();
+    normalized.dedup();
+    Some(normalized)
 }
 
 pub struct DirectConsole {
@@ -370,6 +412,36 @@ mod tests {
         cache.allow_action("delete_file(cache.tmp)");
         assert!(cache.is_allowed("delete_file", Some("delete_file(cache.tmp)")));
         assert!(!cache.is_allowed("delete_file", Some("delete_file(other.tmp)")));
+    }
+
+    #[test]
+    fn write_target_set_approval_is_bound_to_tool_and_complete_target_set() {
+        use std::path::PathBuf;
+
+        let mut cache = SessionApprovalCache::new();
+        let targets = vec![
+            PathBuf::from("/jail/src/a.rs"),
+            PathBuf::from("/jail/src/b.rs"),
+        ];
+        assert!(cache.allow_write_target_set("move_file", &targets));
+
+        assert!(cache.is_write_target_set_allowed("move_file", &targets));
+        assert!(!cache.is_allowed("move_file", None));
+        assert!(!cache.is_allowed("move_file", Some("same summary")));
+        assert!(!cache.is_allowed("copy_file", Some("same summary")));
+        assert!(cache
+            .is_write_target_set_allowed("move_file", &[targets[1].clone(), targets[0].clone()]));
+        assert!(!cache.is_write_target_set_allowed("copy_file", &targets));
+        assert!(!cache.is_write_target_set_allowed(
+            "move_file",
+            &[
+                PathBuf::from("/jail/src/a.rs"),
+                PathBuf::from("/jail/src/c.rs")
+            ]
+        ));
+        assert!(!cache.is_write_target_set_allowed("move_file", &[PathBuf::from("/jail/src/a.rs")]));
+        assert!(!cache.is_write_target_set_allowed("move_file", &[]));
+        assert!(!cache.allow_write_target_set("move_file", &[]));
     }
 
     #[test]

@@ -998,6 +998,8 @@ fn test_junction_escape() {
     std::fs::write(&outside_file, "super_secret_outside_jail").unwrap();
 
     let junc_path = jail.join("junc_link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &junc_path).unwrap();
     #[cfg(windows)]
     {
         let status = std::process::Command::new("cmd")

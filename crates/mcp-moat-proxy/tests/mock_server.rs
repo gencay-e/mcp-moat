@@ -16,6 +16,23 @@ async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--hold-stdin-open" => {
+                tokio::time::sleep(Duration::from_secs(7)).await;
+                return Ok(());
+            }
+            "--verbose-startup" => {
+                let mut stderr = tokio::io::stderr();
+                stderr.write_all(&vec![b'x'; 256 * 1024]).await?;
+                stderr.flush().await?;
+            }
+            "--expect-env-present" | "--expect-env-absent" => {
+                let name = args.next().expect("environment name required");
+                let present = std::env::var_os(&name).is_some();
+                anyhow::ensure!(
+                    present == (arg == "--expect-env-present"),
+                    "Child environment expectation failed"
+                );
+            }
             "--dump-stderr" => {
                 if let Some(val) = args.next() {
                     dump_stderr_size = val.parse().ok();
@@ -134,6 +151,7 @@ async fn handle_request(
             "jsonrpc": "2.0",
             "id": id,
             "result": {
+                "audit_key_present": std::env::var_os("MOAT_AUDIT_KEY").is_some(),
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
                     "tools": {}

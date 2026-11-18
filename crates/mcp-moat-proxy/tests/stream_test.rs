@@ -10,6 +10,103 @@ use mcp_moat_core::{PolicyConfig, PolicyEngine};
 use mcp_moat_proxy::ProxyServer;
 
 #[tokio::test]
+async fn pathless_write_with_command_requires_approval_each_time() {
+    let (mut input, proxy_input) = tokio::io::duplex(4096);
+    let (proxy_output, output) = tokio::io::duplex(4096);
+    let mut config = PolicyConfig::default();
+    config.require_approval_on_write = true;
+    config.custom_modifying_tools.push("echo".into());
+    let console = mcp_moat_tty::DirectConsole::with_io(std::io::Cursor::new(b"a\nn\n"), Vec::new());
+    let proxy = ProxyServer::with_console(PolicyEngine::new(config).unwrap(), Some(console));
+    let proxy_task = tokio::spawn(async move {
+        proxy
+            .wrap_and_run_streams(
+                env!("CARGO_BIN_EXE_mock_server"),
+                &[],
+                proxy_input,
+                proxy_output,
+                tokio::io::sink(),
+            )
+            .await
+    });
+    let mut output = FramedRead::new(output, LinesCodec::new());
+    for id in [1, 2] {
+        let call = json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name":"echo", "arguments":{"message":"status", "command":"echo status"}}
+        });
+        input
+            .write_all(format!("{call}\n").as_bytes())
+            .await
+            .unwrap();
+        let line = tokio::time::timeout(Duration::from_secs(5), output.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], id);
+        assert_eq!(response["result"]["isError"] == true, id == 2);
+    }
+    drop(input);
+    assert_eq!(proxy_task.await.unwrap().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn repeated_proxy_runs_create_independently_sealed_audit_sessions() {
+    let temp = std::env::var_os("MOAT_TEST_TEMP")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let audit = temp.join(format!("moat-repeat-audit-{}.jsonl", std::process::id()));
+    let proxy =
+        ProxyServer::with_console(PolicyEngine::new(PolicyConfig::default()).unwrap(), None)
+            .with_audit(audit.clone(), mcp_moat_core::AuditLevel::Full);
+    for _ in 0..2 {
+        let code = proxy
+            .wrap_and_run_streams(
+                env!("CARGO_BIN_EXE_mock_server"),
+                &[],
+                tokio::io::empty(),
+                tokio::io::sink(),
+                tokio::io::sink(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+    }
+    let content = std::fs::read(&audit).unwrap();
+    std::fs::remove_file(audit).unwrap();
+    let report =
+        mcp_moat_core::verify_audit_log_with_options(content.as_slice(), None, true).unwrap();
+    assert_eq!(report.total_records, 2);
+    assert!(report.is_valid, "{report:?}");
+}
+
+#[tokio::test]
+async fn client_eof_times_out_when_child_does_not_read_stdin() {
+    let input = format!(
+        "{}\n",
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"fixture":"x".repeat(256 * 1024)}})
+    );
+    let proxy =
+        ProxyServer::with_console(PolicyEngine::new(PolicyConfig::default()).unwrap(), None);
+    let code = tokio::time::timeout(
+        Duration::from_secs(6),
+        proxy.wrap_and_run_streams(
+            env!("CARGO_BIN_EXE_mock_server"),
+            &["--hold-stdin-open".into()],
+            std::io::Cursor::new(input.into_bytes()),
+            tokio::io::sink(),
+            tokio::io::sink(),
+        ),
+    )
+    .await
+    .expect("shutdown must finish within the grace period")
+    .unwrap();
+    assert_eq!(code, 1);
+}
+
+#[tokio::test]
 async fn test_stream_1000_requests_and_stderr_overflow_stress() {
     let mock_bin = env!("CARGO_BIN_EXE_mock_server");
     // 200,000 bytes > 128 KiB to trigger OS kernel pipe buffer overflow test
@@ -453,6 +550,7 @@ async fn test_operator_approval_and_session_cache() {
 
     let mut config = PolicyConfig::default();
     config.require_approval_on_write = true; // Force AskOperator on write_file
+    config.allowed_paths = vec![std::env::temp_dir()];
     let policy = PolicyEngine::new(config).unwrap();
 
     // Virtual direct console: operator enters 'a' (AllowAlways) on first prompt
@@ -498,7 +596,7 @@ async fn test_operator_approval_and_session_cache() {
     let resp1: Value = serde_json::from_str(&resp1_line).unwrap();
     assert_eq!(resp1.get("id").and_then(|i| i.as_i64()), Some(1));
     assert!(
-        resp1.get("result").is_some(),
+        resp1.get("result").is_some() && resp1["result"]["isError"] != true,
         "First write_file should succeed after operator 'a'"
     );
 
@@ -529,9 +627,34 @@ async fn test_operator_approval_and_session_cache() {
     let resp2: Value = serde_json::from_str(&resp2_line).unwrap();
     assert_eq!(resp2.get("id").and_then(|i| i.as_i64()), Some(2));
     assert!(
-        resp2.get("result").is_some(),
+        resp2.get("result").is_some() && resp2["result"]["isError"] != true,
         "Second write_file must be auto-approved via SessionApprovalCache"
     );
+
+    // The console has no further answers. A different path or tool must be denied.
+    for (id, tool, path) in [
+        (3, "write_file", format!("{test_file_str}.other")),
+        (4, "delete_file", test_file_str.clone()),
+    ] {
+        let request = json!({"jsonrpc":"2.0", "id":id, "method":"tools/call",
+            "params":{"name":tool,"arguments":{"path":path,"content":"changed"}}});
+        client_tx
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+        client_tx.flush().await.unwrap();
+        let line = tokio::time::timeout(Duration::from_secs(3), framed_out.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], id);
+        assert_eq!(
+            response["result"]["isError"], true,
+            "approval must stay scoped"
+        );
+    }
 
     drop(client_tx);
     let _ = proxy_handle.await;

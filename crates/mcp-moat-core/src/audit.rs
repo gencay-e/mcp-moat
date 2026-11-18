@@ -161,6 +161,9 @@ impl AuditEvent {
     }
 
     pub fn verify_hash(&self) -> bool {
+        self.verify_hash_with_key(None)
+    }
+    fn verify_hash_with_key(&self, key: Option<&[u8]>) -> bool {
         let expected = Self::compute_hash(
             self.sequence,
             &self.timestamp,
@@ -175,24 +178,65 @@ impl AuditEvent {
             self.dlp_redactions,
             &self.prev_hash,
         );
-        expected == self.entry_hash
+        let Some(key) = key else {
+            return expected == self.entry_hash;
+        };
+        use hmac::{Hmac, KeyInit, Mac};
+        let bytes = self.entry_hash.as_bytes();
+        if bytes.len() != 64 {
+            return false;
+        }
+        let mut tag = [0u8; 32];
+        for (i, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
+            let Ok(part) = std::str::from_utf8(pair) else {
+                return false;
+            };
+            let Ok(value) = u8::from_str_radix(part, 16) else {
+                return false;
+            };
+            tag[i] = value;
+        }
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+        mac.update(b"mcp-moat audit hmac-sha256 v1\0");
+        mac.update(expected.as_bytes());
+        mac.verify_slice(&tag).is_ok()
     }
 }
 
+fn keyed_hash(hash: &str, key: Option<&[u8]>) -> String {
+    let Some(key) = key else {
+        return hash.to_string();
+    };
+    use hmac::{Hmac, KeyInit, Mac};
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(b"mcp-moat audit hmac-sha256 v1\0");
+    mac.update(hash.as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Helper that manages cryptographic sequence numbering and hash chaining for a session
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuditChain {
     session_id: String,
     next_sequence: u64,
     last_hash: String,
+    key: Option<Vec<u8>>,
 }
 
 impl AuditChain {
     pub fn new(session_id: impl Into<String>) -> Self {
+        Self::with_key(session_id, None)
+    }
+    pub fn with_key(session_id: impl Into<String>, key: Option<Vec<u8>>) -> Self {
         Self {
             session_id: session_id.into(),
             next_sequence: 1,
             last_hash: GENESIS_HASH.to_string(),
+            key,
         }
     }
 
@@ -228,6 +272,7 @@ impl AuditChain {
             &prev,
         );
 
+        let entry_hash = keyed_hash(&entry_hash, self.key.as_deref());
         self.last_hash = entry_hash.clone();
 
         AuditEvent {
@@ -260,10 +305,18 @@ pub struct VerificationReport {
 pub fn verify_audit_log(
     reader: impl io::BufRead,
 ) -> Result<VerificationReport, Box<dyn std::error::Error>> {
-    let mut sessions: HashMap<String, (u64, String)> = HashMap::new();
+    verify_audit_log_with_options(reader, None, false)
+}
+
+pub fn verify_audit_log_with_options(
+    reader: impl io::BufRead,
+    key: Option<&[u8]>,
+    require_seal: bool,
+) -> Result<VerificationReport, Box<dyn std::error::Error>> {
+    let mut sessions: HashMap<String, (u64, String, bool)> = HashMap::new();
     let mut count = 0;
 
-    for line_res in reader.lines() {
+    for (line_index, line_res) in reader.lines().enumerate() {
         let line = line_res?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -279,7 +332,7 @@ pub fn verify_audit_log(
                     tampered_sequence: None,
                     error_message: Some(format!(
                         "Malformed audit record on line {}: {}",
-                        count + 1,
+                        line_index + 1,
                         e
                     )),
                 });
@@ -312,7 +365,7 @@ pub fn verify_audit_log(
                     });
                 }
 
-                if !event.verify_hash() {
+                if !event.verify_hash_with_key(key) {
                     return Ok(VerificationReport {
                         total_records: count,
                         is_valid: false,
@@ -326,10 +379,23 @@ pub fn verify_audit_log(
 
                 sessions.insert(
                     event.session_id.clone(),
-                    (event.sequence, event.entry_hash.clone()),
+                    (
+                        event.sequence,
+                        event.entry_hash.clone(),
+                        event.direction == AuditDirection::Internal
+                            && event.method == "session_end",
+                    ),
                 );
             }
-            Some((last_seq, last_hash)) => {
+            Some((last_seq, last_hash, sealed)) => {
+                if *sealed {
+                    return Ok(VerificationReport {
+                        total_records: count,
+                        is_valid: false,
+                        tampered_sequence: Some(event.sequence),
+                        error_message: Some("Event after session end".into()),
+                    });
+                }
                 if event.sequence != *last_seq + 1 {
                     return Ok(VerificationReport {
                         total_records: count,
@@ -355,7 +421,7 @@ pub fn verify_audit_log(
                     });
                 }
 
-                if !event.verify_hash() {
+                if !event.verify_hash_with_key(key) {
                     return Ok(VerificationReport {
                         total_records: count,
                         is_valid: false,
@@ -369,10 +435,20 @@ pub fn verify_audit_log(
 
                 *last_seq = event.sequence;
                 *last_hash = event.entry_hash.clone();
+                *sealed =
+                    event.direction == AuditDirection::Internal && event.method == "session_end";
             }
         }
     }
 
+    if require_seal && (sessions.is_empty() || sessions.values().any(|(_, _, sealed)| !sealed)) {
+        return Ok(VerificationReport {
+            total_records: count,
+            is_valid: false,
+            tampered_sequence: None,
+            error_message: Some("Missing session end seal".into()),
+        });
+    }
     Ok(VerificationReport {
         total_records: count,
         is_valid: true,
@@ -773,15 +849,88 @@ mod tests {
             None,
             None,
         );
-        let log_data = format!(
-            "{}\n{{not valid json}}\n",
-            serde_json::to_string(&e1).unwrap()
-        );
+        let log_data = format!("{}\n\n{{", serde_json::to_string(&e1).unwrap());
         let report = verify_audit_log(log_data.as_bytes()).unwrap();
         assert!(!report.is_valid);
+        assert_eq!(report.total_records, 1);
         assert!(report
             .error_message
             .unwrap()
-            .contains("Malformed audit record on line 2"));
+            .contains("Malformed audit record on line 3"));
+    }
+}
+
+#[cfg(test)]
+mod keyed_contract_tests {
+    use super::*;
+    #[test]
+    fn keyed_seal_rejects_missing_wrong_key_and_truncation() {
+        let mut chain = AuditChain::with_key("session", Some(b"secret".to_vec()));
+        let first = chain.create_event(
+            "now".into(),
+            AuditDirection::Internal,
+            "start".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let end = chain.create_event(
+            "now".into(),
+            AuditDirection::Internal,
+            "session_end".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let full = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&end).unwrap()
+        );
+        assert!(
+            verify_audit_log_with_options(full.as_bytes(), Some(b"secret"), true)
+                .unwrap()
+                .is_valid
+        );
+        assert!(
+            !verify_audit_log_with_options(full.as_bytes(), None, true)
+                .unwrap()
+                .is_valid
+        );
+        assert!(
+            !verify_audit_log_with_options(full.as_bytes(), Some(b"wrong"), true)
+                .unwrap()
+                .is_valid
+        );
+        let truncated = format!("{}\n", serde_json::to_string(&first).unwrap());
+        assert!(
+            !verify_audit_log_with_options(truncated.as_bytes(), Some(b"secret"), true)
+                .unwrap()
+                .is_valid
+        );
+        let mut forged = AuditChain::new("session");
+        let event = forged.create_event(
+            "now".into(),
+            AuditDirection::Internal,
+            "session_end".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let data = format!("{}\n", serde_json::to_string(&event).unwrap());
+        assert!(
+            !verify_audit_log_with_options(data.as_bytes(), Some(b"secret"), true)
+                .unwrap()
+                .is_valid
+        );
     }
 }

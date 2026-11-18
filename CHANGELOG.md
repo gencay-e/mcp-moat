@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0 (2026-11-19)
+
+### Added
+
+* Authenticate audit entries with HMAC-SHA256 using `MOAT_AUDIT_KEY`. The proxy seals completed sessions, and `moat audit verify --require-seal` rejects unsealed sessions.
+* Scrub sensitive variables from the wrapped server's environment by default. Configure filtering with `scrub_env`, `pass_env` and `clear_env`. The wrapped server never receives the audit key.
+* Add PostgreSQL and Playwright presets. Generic SQL queries and browser actions that execute code or handle local files require approval.
+* Exercise eight real MCP servers, including PostgreSQL in Docker and Playwright with a local browser.
+
+### Changed
+
+* Check new paths against their deepest existing ancestor and reject hardlinked file components on Unix and Windows.
+* Apply blocked command rules to nested shell and process wrappers and to chained commands.
+* Bind session-wide write approvals to the tool and canonical target paths when write approval is required. Pathless writes can only be approved one call at a time.
+* Clean up wrapped Windows process trees on Ctrl+C and test terminal approval through ConPTY.
+* Update the TOML configuration dependency to 1.x.
+
 ## 0.3.1 (2026-11-15)
 
 ### Fixed

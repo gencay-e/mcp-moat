@@ -41,10 +41,10 @@ The output is from a run of `scripts/demo.py` and is shortened (timestamps and e
 * **UNC and NT paths.** Paths starting with `\\`, `//`, `\??\`, `/??/`, `\device\` or `/device/` are rejected before any file system access, as are the `\GLOBAL??\`, `\GLOBALROOT\`, `\DosDevices\`, `\SystemRoot\`, `\BaseNamedObjects\`, `\ArcName\` and `\KernelObjects\` namespaces. Separators are normalized first, so mixed forms such as `\/?\C:\` are caught too. This is a text check. It has not been verified against a real SMB or NTLM scenario on Windows.
 * **Protected files.** Writes to files such as `.git`, `.gitmodules`, `.gitconfig`, `.env`, `moat.toml`, `.vscode`, `.github`, the audit log, SSH keys and AWS credentials always need operator approval. The file passed to `--config` is added to this list automatically, so an agent cannot rewrite the policy that guards it.
 * **Read-only mode.** `--read-only` blocks tools that look like they modify files, based on tool name prefixes and suffixes, and tools listed in `custom_modifying_tools`.
-* **Blocked commands.** `blocked_commands` and `blocked_commands_regex` reject shell commands. Literal rules are tokenized: whitespace is collapsed, path prefixes such as `/bin/rm` are resolved to the program name, and combined short flags are compared as sets. `rm  -rf /`, `rm -r -f /`, `/bin/rm -fr /` and `sudo rm -rf /` are blocked, while `rm -rf /tmp/build` goes to the operator prompt. This is not a complete shell parser, see [SECURITY.md](https://github.com/gencay-e/mcp-moat/blob/main/SECURITY.md).
-* **Shell metacharacters.** Command arguments with `|`, `&`, `;`, `$`, backticks, `<`, `>` or control characters are not blocked outright. They need operator approval. PowerShell encoded-command flags are blocked.
+* **Blocked commands.** `blocked_commands` rules are tokenized: whitespace is collapsed, path prefixes such as `/bin/rm` are resolved to the program name, and combined short flags are compared as sets. `blocked_commands_regex` patterns are checked against shell segments and recognized nested wrappers. The matcher covers `sh`/`bash`/`zsh -c`, `cmd /c`, `powershell`/`pwsh -c`, and process wrappers such as `env`, `nohup`, `nice`, `timeout`, and `xargs`. Examples such as `sh -c 'rm -rf /'` and `echo ok && bash -c 'rm -rf /'` match an anchored destructive regex. `rm -rf /tmp/build` still goes to the operator prompt. The matcher is not a complete shell parser; see [SECURITY.md](https://github.com/gencay-e/mcp-moat/blob/main/SECURITY.md).
+* **Shell metacharacters.** `;`, `&&`, `||`, and `|` separate command segments for blocked-command checks. Other syntax and expansion can still require operator approval. PowerShell encoded-command flags are blocked.
 * **Reserved device names.** Path segments such as `CON`, `NUL`, `AUX`, `COM1` are rejected on all platforms. On Linux and macOS this also rejects real directories with these names.
-* **Symlinks and hardlinks.** Paths are resolved and checked against the jail. Hardlink checks (link count above 1) exist on Unix only. Symlinks to the outside are tested on Linux by `scripts/real_server_check.py`, not on macOS or Windows. A change between the check and the use of a file cannot be ruled out.
+* **Symlinks and hardlinks.** The jail resolves existing path components, including symlinks and Windows junctions, and rejects hardlinked files on Unix and Windows. Path changes between the check and the server's use remain possible.
 * **Batch requests.** JSON-RPC batch arrays are rejected.
 
 ### Secret masking
@@ -57,7 +57,7 @@ Not covered: secrets in other formats, Base64-encoded secrets (unless the heuris
 
 ### Operator prompts
 
-For actions that need approval, `moat` asks on the terminal device directly (`/dev/tty` on Unix, `CONIN$` on Windows), so the JSON-RPC stream on stdin and stdout is not disturbed. File changes are shown as a diff. `[a]llow always` remembers the decision for the session. For shell tools the decision is remembered per exact action only. With `--no-prompt`, every action that needs approval is denied, and the block message says that `--no-prompt` is the reason.
+For actions that need approval, `moat` asks on the terminal device directly (`/dev/tty` on Unix, `CONIN$` on Windows), so the JSON-RPC stream on stdin and stdout is not disturbed. File changes are shown as a diff. Under `require_approval_on_write`, `[a]llow always` is scoped to the tool and the canonical target path (or complete target-path set); it does not grant tool-wide or summary-wide permission. A write without a target path cannot receive a persistent approval. Shell commands are remembered only for the exact command. With `--no-prompt`, every action that needs approval is denied.
 
 ### Stream handling
 
@@ -69,11 +69,13 @@ For actions that need approval, `moat` asks on the terminal device directly (`/d
 
 ### Audit log
 
-`--audit-log <file>` writes one JSON line per event. Each line contains the SHA-256 hash of the previous line (`prev_hash`). `moat audit verify <file>` checks the chain and reports the first broken line.
+`--audit-log <file>` writes one JSON line per event. Each line contains a `prev_hash` field that links to the previous entry in the same session. Each session starts with a fixed genesis hash. `moat audit verify <file>` checks each session's chain.
 
-What this detects: changing, reordering or deleting a line in the middle of a session.
+Set `MOAT_AUDIT_KEY` to authenticate new entries with a domain-separated HMAC-SHA256. Verify with the same key using `moat audit verify <file>`; `--require-seal` also requires a final `session_end` event for every session. The wrapped server does not inherit `MOAT_AUDIT_KEY`.
 
-What this does not detect: cutting lines off the end, deleting a whole session, deleting the file, or rebuilding a log from scratch. The hash is not keyed and there is no external anchor. Do not treat the log as tamper-proof evidence. Previews in the log are passed through the secret masking.
+Without a key, an attacker who can rewrite the log can recompute its hashes. A keyed log detects changes without the key, but key loss prevents verification. Neither mode detects deletion of the whole file or a whole session without an external record. Do not treat the log as tamper-proof evidence. Previews in the log are passed through secret masking.
+
+The chain detects changing or reordering an entry in a session.
 
 If the audit log cannot be written, the call is not forwarded (fail closed).
 
@@ -160,7 +162,7 @@ moat wrap --preset filesystem --no-prompt -- npx -y @modelcontextprotocol/server
 moat wrap --preset filesystem --audit-log .moat/audit.jsonl --audit-level full -- npx -y @modelcontextprotocol/server-filesystem .
 ```
 
-Presets: `filesystem`, `git`, `fetch`, `sqlite`, `memory`.
+Presets: `filesystem`, `git`, `fetch`, `sqlite`, `memory`, `postgres`, `playwright`.
 
 ### Configuration (`moat.toml`)
 
@@ -176,6 +178,13 @@ read_only = false
 # Require operator approval for writes inside allowed directories.
 # Protected files always require approval.
 require_approval_on_write = false
+
+# Remove common secret variables from the wrapped server's environment.
+scrub_env = true
+# Add only the named variables needed by the server.
+# pass_env = ["NODE_OPTIONS", "CUSTOM_SETTING"]
+# Start with only a small base environment plus pass_env entries.
+clear_env = false
 
 # Shell command patterns that are blocked (tokenized match).
 blocked_commands = [
@@ -284,13 +293,14 @@ Edit `claude_desktop_config.json` (Windows: `%APPDATA%\Claude\`, macOS: `~/Libra
 
 ## Tested against real MCP servers
 
-`scripts/real_server_check.py` starts mcp-moat in front of three real servers and checks 58 cases (56 on Windows, where the two symlink cases are skipped). It needs Node.js, Python and git, and runs in CI on Linux.
+`scripts/real_server_check.py` exercises eight real MCP servers: filesystem, everything, memory, git, SQLite, fetch, PostgreSQL and Playwright. It checks environment filtering, path jail enforcement and audit verification with `--require-seal`. It needs Node.js, Python, git, `uvx` for Python servers, Docker for PostgreSQL and a local Chrome, Chromium or Edge executable for Playwright.
 
-* `@modelcontextprotocol/server-filesystem`: reads inside and outside the jail, `..`, symlinks to the outside, protected files, read-only mode, secret masking, audit chain.
+* `@modelcontextprotocol/server-filesystem`: reads inside and outside the jail, `..`, a Windows junction escape, protected files, read-only mode, secret masking and audit chain.
 * `mcp-server-git`: this server does not restrict itself. It reads any repository you name. mcp-moat keeps it inside the allowed folder, including relative file lists such as `files: ["src/main.rs"]`, which are checked against `repo_path`.
 * `@modelcontextprotocol/server-everything`: a tool that dumps the environment (`get-env`) has its secrets masked; tools that are not on the allow list are blocked.
+* `@modelcontextprotocol/server-memory`, `mcp-server-sqlite` and `mcp-server-fetch`: real-server reads and unattended-write behavior are checked; fetch uses a local HTTP fixture and the test-only `--allow-private-ips` option.
 
-The servers are pinned: `@modelcontextprotocol/server-filesystem@2.3.0`, `@modelcontextprotocol/server-everything@2.3.0` and `mcp-server-git==2026.11.11` (also in `scripts/demo.py` and the CI workflow). Update the pins on purpose and run the check again. Other MCP servers and versions were not tested.
+Server versions are pinned in the script: `@modelcontextprotocol/server-filesystem@2.3.0`, `@modelcontextprotocol/server-everything@2.3.0`, `@modelcontextprotocol/server-memory@2.1.1`, `mcp-server-git==2026.11.11`, `mcp-server-sqlite==2025.4.25` with MCP SDK 1.26.0, `mcp-server-fetch==2026.11.11`, `@modelcontextprotocol/server-postgres@0.6.2` with `postgres:17.6-alpine`, and `@playwright/mcp@0.0.85`. Update pins deliberately and rerun the checks; other servers and versions are not covered.
 
 ### Good to know
 
@@ -300,15 +310,13 @@ The servers are pinned: `@modelcontextprotocol/server-filesystem@2.3.0`, `@model
 * **Commands.** A call with a command argument is never allowed automatically. It is blocked (blocked command) or needs operator approval. A tool that is not authorized and does not modify is blocked before its command is looked at.
 * **Tools without a path.** Tools with a file-like name that take no path (`get-sum`) need `non_file_tools = ["get-sum"]`, otherwise mcp-moat blocks them because it finds no path to check. This includes calls without arguments. `list_allowed_directories` is exempt. `non_file_tools` does not allow a tool; paths that are present are still checked. The presets list their own pathless tools (see below).
 * **URLs and paths.** Only local paths and `file://` URIs are checked as paths. An `http://` or `https://` URL in a URL argument (`url`, `uri`, `href`, `*_url`) is not a path and is not jail-checked. The tool that fetches it must still be authorized (listed or enabled by a preset). An `http(s)` URL in a path argument (`path`, `file`) is rejected, and `file://` URLs and bare paths in a URL argument are jail-checked.
-* **Presets.** `filesystem`: read tools and the standard filesystem tools are allowed, `delete_file` needs approval. `git`: read tools, `git_add`, `git_commit`, `git_create_branch` and `git_checkout` are allowed; `git_push`, `git_reset` and `git_merge` need approval. `fetch`: sets `read_only`, so `http_post`, `http_put`, `http_delete` and `http_patch` are blocked; `fetch`, `http_get`, `read_url` and `web_search` are allowed. `sqlite`: `read_query`, `list_tables`, `describe_table` and `show_schema` are allowed, `write_query`, `execute_query`, `create_table` and `drop_table` need approval. `memory`: `read_graph`, `search_nodes` and `open_nodes` are allowed, the tools that create, delete or add need approval. The pathless tools of `sqlite`, `memory` and `fetch` are exempted from the path requirement by the preset, not by their name. Without the preset they are unknown tools.
+* **Presets.** `filesystem`: read tools and the standard filesystem tools are allowed, `delete_file` needs approval. `git`: read tools, `git_add`, `git_commit`, `git_create_branch` and `git_checkout` are allowed; `git_push`, `git_reset` and `git_merge` need approval. `fetch`: sets `read_only`, so `http_post`, `http_put`, `http_delete` and `http_patch` are blocked; `fetch`, `http_get`, `read_url` and `web_search` are allowed. `sqlite`: `read_query`, `list_tables`, `describe_table` and `show_schema` are allowed, `write_query`, `execute_query`, `create_table` and `drop_table` need approval. `memory`: `read_graph`, `search_nodes` and `open_nodes` are allowed, the tools that create, delete or add need approval. `postgres`: `read_query`, `list_tables`, `describe_table` and `show_schema` are allowed; writes need approval. `@modelcontextprotocol/server-postgres` exposes a generic `query` tool that needs approval even for `SELECT`. `playwright`: navigation and snapshots without a filename are allowed. `browser_evaluate`, uploads, downloads, screenshots and snapshots with a filename need approval. The pinned Playwright server does not expose a download tool. The pathless tools of `sqlite`, `memory`, `fetch` and `postgres` are exempted from the path requirement by their preset, not by their name. Without the preset they are unknown tools.
 * Argument names that look like paths but are not can be listed in `ignore_path_keys`. That is an operator decision: the keys are ignored for every tool of the policy. The presets ignore keys for their own tools only: git for `target`, `revision`, `branch_name` and similar (on `git_*` tools), memory for `from` and `to` (on the memory tools).
-* New files in directories that do not exist yet are blocked, because the parent folder cannot be resolved. Create the folder first.
+* New files in directories that do not exist yet are checked through the deepest existing ancestor. Remaining segments must pass strict lexical validation.
 
-## Platform status
+## Platform tests
 
-* **Linux:** the test suite passes (`cargo test --workspace --all-targets`).
-* **macOS and Windows:** the same tests run in CI. Windows-specific protections (UNC, NT namespace, reserved device names, `CONIN$`) and macOS terminal handling have not been checked by hand on real systems. Treat them as partly tested.
-* Hardlink checks work on Unix only.
+The CI test matrix targets Linux, macOS and Windows. Unix fixtures cover symlink resolution and hardlinks. Windows fixtures cover directory junctions, NT namespace paths and hardlinks. The Windows ConPTY check covers terminal approval, Ctrl+C exit code 130 and cleanup of child processes.
 
 ## Development
 

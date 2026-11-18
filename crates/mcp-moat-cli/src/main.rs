@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use mcp_moat_core::{
-    verify_audit_log, AuditDecision, AuditEvent, AuditLevel, CodegenFormat, PolicyConfig,
-    PolicyEngine, TokenOptimizer,
+    verify_audit_log_with_options, AuditDecision, AuditEvent, AuditLevel, CodegenFormat,
+    PolicyConfig, PolicyEngine, TokenOptimizer,
 };
 use mcp_moat_proxy::ProxyServer;
 use std::fs::File;
@@ -55,7 +55,7 @@ pub enum Commands {
         #[arg(long = "audit-level", value_parser = ["full", "decisions_only", "violations_only"])]
         audit_level: Option<String>,
 
-        /// Preconfigured security preset (filesystem, git, fetch, sqlite, memory)
+        /// Preconfigured security preset (filesystem, git, fetch, sqlite, memory, postgres, playwright)
         #[arg(long = "preset", short = 'p')]
         preset: Option<String>,
 
@@ -127,7 +127,7 @@ pub enum Commands {
         #[arg(long = "hide-tool")]
         hide_tool: Vec<String>,
 
-        /// Preconfigured security preset (filesystem, git, fetch, sqlite, memory)
+        /// Preconfigured security preset (filesystem, git, fetch, sqlite, memory, postgres, playwright)
         #[arg(long = "preset", short = 'p')]
         preset: Option<String>,
 
@@ -154,6 +154,8 @@ pub enum AuditCommands {
         /// Path to audit log file (default: .moat/audit.jsonl)
         #[arg(default_value = ".moat/audit.jsonl")]
         path: PathBuf,
+        #[arg(long)]
+        require_seal: bool,
     },
 
     /// Query and inspect events in an audit log
@@ -322,12 +324,15 @@ async fn main() -> Result<()> {
                         audit_log.display()
                     );
                 }
-                if let Some(parent) = audit_log.parent() {
-                    if !parent.as_os_str().is_empty() && !parent.exists() {
+                if let Some(parent) = audit_log.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    if !parent.exists() {
                         anyhow::bail!(
                             "audit_log parent directory does not exist: {}",
                             parent.display()
                         );
+                    }
+                    if !parent.is_dir() {
+                        anyhow::bail!("audit_log parent is not a directory: {}", parent.display());
                     }
                 }
             }
@@ -483,13 +488,28 @@ async fn main() -> Result<()> {
 
                 let executable = mcp_moat_proxy::command::resolve_command(cmd.as_ref())
                     .with_context(|| format!("Failed to resolve MCP server '{}'", cmd))?;
-                let mut child = TokioCommand::new(executable)
+                let mut child_command = TokioCommand::new(executable);
+                mcp_moat_core::child_env::configure_child(
+                    child_command.as_std_mut(),
+                    policy.config(),
+                );
+                #[cfg(windows)]
+                mcp_moat_proxy::process::prepare(&mut child_command);
+                let mut child = child_command
                     .args(args)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
+                    .stderr(Stdio::null())
                     .spawn()
                     .with_context(|| format!("Failed to spawn MCP server '{}'", cmd))?;
+                #[cfg(windows)]
+                let _child_job = match mcp_moat_proxy::process::attach_and_resume(&mut child) {
+                    Ok(job) => job,
+                    Err(error) => {
+                        let _ = child.wait().await;
+                        return Err(error.into());
+                    }
+                };
 
                 let mut stdin = child.stdin.take().context("Failed to open child stdin")?;
                 let stdout = child.stdout.take().context("Failed to open child stdout")?;
@@ -584,7 +604,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Audit { action } => match action {
-            AuditCommands::Verify { path } => {
+            AuditCommands::Verify { path, require_seal } => {
                 if !path.exists() {
                     eprintln!(
                         "[moat] Error: Audit log file '{}' does not exist.",
@@ -596,7 +616,15 @@ async fn main() -> Result<()> {
                     .with_context(|| format!("Failed to open audit log '{}'", path.display()))?;
                 let reader = BufReader::new(file);
 
-                match verify_audit_log(reader) {
+                let key = std::env::var_os("MOAT_AUDIT_KEY");
+                if key.as_ref().is_some_and(|v| v.is_empty()) {
+                    anyhow::bail!("MOAT_AUDIT_KEY must not be empty");
+                }
+                match verify_audit_log_with_options(
+                    reader,
+                    key.as_ref().map(|v| v.as_encoded_bytes()),
+                    require_seal,
+                ) {
                     Ok(report) => {
                         if report.is_valid {
                             eprintln!("[moat] Audit Log Integrity Check: PASSED");

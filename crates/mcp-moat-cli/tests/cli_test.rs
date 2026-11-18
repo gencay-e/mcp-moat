@@ -90,6 +90,94 @@ fn get_moat_bin() -> &'static str {
     env!("CARGO_BIN_EXE_moat")
 }
 
+#[tokio::test]
+async fn codegen_handles_verbose_server_startup() {
+    let output = Command::new(get_moat_bin())
+        .args(["codegen", "--format", "ts", "--"])
+        .arg(get_mock_server_bin())
+        .arg("--verbose-startup")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("echo"));
+}
+
+#[tokio::test]
+async fn child_environment_is_scrubbed_for_wrap_and_codegen() {
+    let directory = std::env::temp_dir().join(format!("moat-env-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    for (label, config, expected) in [
+        ("default", "", false),
+        (
+            "pass",
+            "pass_env = [\"GITHUB_TOKEN\", \"MOAT_AUDIT_KEY\"]\n",
+            true,
+        ),
+        (
+            "clear",
+            "clear_env = true\npass_env = [\"GITHUB_TOKEN\", \"MOAT_AUDIT_KEY\"]\n",
+            true,
+        ),
+    ] {
+        let policy = directory.join(format!("{label}.toml"));
+        std::fs::write(&policy, config).unwrap();
+        for action in ["wrap", "codegen"] {
+            let mut command = Command::new(get_moat_bin());
+            command
+                .stdin(Stdio::null())
+                .args([action, "--config"])
+                .arg(&policy)
+                .arg("--")
+                .arg(get_mock_server_bin())
+                .args([
+                    "--expect-env-absent",
+                    "MOAT_AUDIT_KEY",
+                    "--expect-env-absent",
+                    "CLIENT_SECRET_VALUE",
+                    "--expect-env-absent",
+                    "OPENAI_API_KEY",
+                    "--expect-env-absent",
+                    "DB_PASSWORD",
+                    if expected {
+                        "--expect-env-present"
+                    } else {
+                        "--expect-env-absent"
+                    },
+                    "GITHUB_TOKEN",
+                    if label == "clear" {
+                        "--expect-env-absent"
+                    } else {
+                        "--expect-env-present"
+                    },
+                    "PUBLIC_VALUE",
+                ])
+                .env("MOAT_AUDIT_KEY", "test-key")
+                .env("CLIENT_SECRET_VALUE", "private")
+                .env("OPENAI_API_KEY", "private")
+                .env("DB_PASSWORD", "private")
+                .env("GITHUB_TOKEN", "private")
+                .env("PUBLIC_VALUE", "public");
+            let result = command.output().await.unwrap();
+            assert!(
+                result.status.success(),
+                "Child environment case failed: {label}/{action}"
+            );
+            if action == "codegen" {
+                assert!(
+                    String::from_utf8_lossy(&result.stdout).contains("echo"),
+                    "Codegen child did not answer"
+                );
+            }
+        }
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 fn get_mock_server_bin() -> PathBuf {
     let moat = Path::new(get_moat_bin());
     let bin_dir = moat.parent().expect("Moat binary has parent dir");
@@ -1206,6 +1294,52 @@ async fn test_cli_check_missing_allowed_path() {
 }
 
 #[tokio::test]
+async fn test_cli_check_rejects_file_as_audit_log_parent() {
+    let dir = std::env::temp_dir();
+    let parent = dir.join(format!("moat_audit_parent_{}", std::process::id()));
+    let config_path = parent.with_extension("toml");
+    std::fs::write(&parent, "existing file").unwrap();
+    let content = format!(
+        "allowed_paths = ['.']\naudit_log = '{}'\n",
+        parent.join("audit.jsonl").display()
+    );
+    std::fs::write(&config_path, content).unwrap();
+
+    let output = Command::new(get_moat_bin())
+        .args(["check", "--config"])
+        .arg(&config_path)
+        .output()
+        .await
+        .unwrap();
+
+    std::fs::remove_file(config_path).unwrap();
+    std::fs::remove_file(parent).unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("audit_log parent is not a directory"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn test_cli_preset_help_lists_postgres_and_playwright() {
+    for command in ["wrap", "codegen"] {
+        let output = Command::new(get_moat_bin())
+            .args([command, "--help"])
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            help.contains("postgres") && help.contains("playwright"),
+            "{help}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_cli_completion_scripts() {
     let moat = get_moat_bin();
     for shell in ["bash", "zsh", "fish", "powershell"] {
@@ -1555,4 +1689,183 @@ async fn test_monitor_mode_stderr_never_contains_request_strings() {
     );
     assert!(!log.contains(MARKER), "log contains the marker:\n{log}");
     assert!(!log.contains('\u{1b}'), "log contains a raw escape:\n{log}");
+}
+
+#[tokio::test]
+async fn audit_verify_requires_key_and_seal() {
+    use mcp_moat_core::{AuditChain, AuditDirection};
+    let dir = std::env::var_os("MOAT_TEST_TEMP")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let path = dir.join(format!("moat-audit-seal-{}.jsonl", std::process::id()));
+    let mut chain = AuditChain::with_key("session", Some(b"test-key".to_vec()));
+    let first = chain.create_event(
+        "now".into(),
+        AuditDirection::Internal,
+        "start".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let end = chain.create_event(
+        "now".into(),
+        AuditDirection::Internal,
+        "session_end".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let first_line = serde_json::to_string(&first).unwrap();
+    std::fs::write(
+        &path,
+        format!("{}\n{}\n", first_line, serde_json::to_string(&end).unwrap()),
+    )
+    .unwrap();
+    for (key, expected) in [
+        (Some("test-key"), true),
+        (Some("wrong-key"), false),
+        (None, false),
+    ] {
+        let mut cmd = Command::new(get_moat_bin());
+        cmd.args(["audit", "verify", "--require-seal"])
+            .arg(&path)
+            .env_remove("MOAT_AUDIT_KEY");
+        if let Some(key) = key {
+            cmd.env("MOAT_AUDIT_KEY", key);
+        }
+        assert_eq!(cmd.output().await.unwrap().status.success(), expected);
+    }
+    std::fs::write(&path, format!("{}\n", first_line)).unwrap();
+    let status = Command::new(get_moat_bin())
+        .args(["audit", "verify", "--require-seal"])
+        .arg(&path)
+        .env("MOAT_AUDIT_KEY", "test-key")
+        .output()
+        .await
+        .unwrap()
+        .status;
+    assert!(!status.success());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn audit_key_preserves_non_unicode_bytes() {
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    let key = {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(vec![b'k', 0xff])
+    };
+    #[cfg(windows)]
+    let key = {
+        use std::os::windows::ffi::OsStringExt;
+        OsString::from_wide(&[b'k' as u16, 0xd800])
+    };
+
+    let dir = std::env::var_os("MOAT_TEST_TEMP")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let path = dir.join(format!("moat-audit-key-bytes-{}.jsonl", std::process::id()));
+    let wrapped = Command::new(get_moat_bin())
+        .args(["wrap", "--audit-log"])
+        .arg(&path)
+        .arg("--")
+        .arg(get_mock_server_bin())
+        .env("MOAT_AUDIT_KEY", &key)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    assert!(wrapped.status.success());
+    let records = std::fs::read(&path).unwrap();
+    let report = mcp_moat_core::audit::verify_audit_log_with_options(
+        &records[..],
+        Some(key.as_encoded_bytes()),
+        true,
+    )
+    .unwrap();
+
+    let mut chain =
+        mcp_moat_core::AuditChain::with_key("exact-key", Some(key.as_encoded_bytes().to_vec()));
+    let seal = chain.create_event(
+        "now".into(),
+        mcp_moat_core::AuditDirection::Internal,
+        "session_end".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    std::fs::write(&path, serde_json::to_vec(&seal).unwrap()).unwrap();
+    let verified = Command::new(get_moat_bin())
+        .args(["audit", "verify", "--require-seal"])
+        .arg(&path)
+        .env("MOAT_AUDIT_KEY", &key)
+        .output()
+        .await
+        .unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!((report.is_valid, verified.status.success()), (true, true));
+}
+
+#[tokio::test]
+async fn audit_key_is_removed_from_child_and_eof_seals_all_levels() {
+    let dir = std::env::var_os("MOAT_TEST_TEMP")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    for level in ["full", "decisions_only", "violations_only"] {
+        let path = dir.join(format!(
+            "moat-audit-e2e-{}-{level}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut child = Command::new(get_moat_bin())
+            .args(["wrap", "--audit-log"])
+            .arg(&path)
+            .args(["--audit-level", level, "--"])
+            .arg(get_mock_server_bin())
+            .env("MOAT_AUDIT_KEY", "test-key")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
+        input
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n")
+            .await
+            .unwrap();
+        input.flush().await.unwrap();
+        let line = tokio::time::timeout(Duration::from_secs(10), output.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["result"]["audit_key_present"], false);
+        drop(input);
+        assert!(tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success());
+        let result = Command::new(get_moat_bin())
+            .args(["audit", "verify", "--require-seal"])
+            .arg(&path)
+            .env("MOAT_AUDIT_KEY", "test-key")
+            .output()
+            .await
+            .unwrap();
+        assert!(result.status.success());
+        std::fs::remove_file(path).unwrap();
+    }
 }

@@ -6,6 +6,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, LinesCodec};
 
+mod common;
+
 use mcp_moat_core::{PolicyConfig, PolicyEngine};
 use mcp_moat_proxy::ProxyServer;
 
@@ -21,7 +23,7 @@ async fn pathless_write_with_command_requires_approval_each_time() {
     let proxy_task = tokio::spawn(async move {
         proxy
             .wrap_and_run_streams(
-                env!("CARGO_BIN_EXE_mock_server"),
+                common::mock_server_bin(),
                 &[],
                 proxy_input,
                 proxy_output,
@@ -64,7 +66,7 @@ async fn repeated_proxy_runs_create_independently_sealed_audit_sessions() {
     for _ in 0..2 {
         let code = proxy
             .wrap_and_run_streams(
-                env!("CARGO_BIN_EXE_mock_server"),
+                common::mock_server_bin(),
                 &[],
                 tokio::io::empty(),
                 tokio::io::sink(),
@@ -93,7 +95,7 @@ async fn client_eof_times_out_when_child_does_not_read_stdin() {
     let code = tokio::time::timeout(
         Duration::from_secs(6),
         proxy.wrap_and_run_streams(
-            env!("CARGO_BIN_EXE_mock_server"),
+            common::mock_server_bin(),
             &["--hold-stdin-open".into()],
             std::io::Cursor::new(input.into_bytes()),
             tokio::io::sink(),
@@ -108,7 +110,7 @@ async fn client_eof_times_out_when_child_does_not_read_stdin() {
 
 #[tokio::test]
 async fn test_stream_1000_requests_and_stderr_overflow_stress() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     // 200,000 bytes > 128 KiB to trigger OS kernel pipe buffer overflow test
     let args = vec!["--dump-stderr".to_string(), "200000".to_string()];
 
@@ -264,7 +266,7 @@ async fn test_stream_1000_requests_and_stderr_overflow_stress() {
 
 #[tokio::test]
 async fn test_ping_bypass_overtakes_waiting_calls() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     // Simulate server processing delay of 1500ms on tool calls. The ping must arrive well
     // before that; the margin keeps the test stable on slow CI runners.
     let args = vec!["--delay".to_string(), "1500".to_string()];
@@ -343,7 +345,7 @@ async fn test_ping_bypass_overtakes_waiting_calls() {
 
 #[tokio::test]
 async fn test_fail_closed_error_responses() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(256 * 1024);
@@ -438,7 +440,7 @@ async fn test_fail_closed_error_responses() {
 
 #[tokio::test]
 async fn test_max_frame_size_limit_16mb() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(32 * 1024 * 1024);
@@ -478,7 +480,7 @@ async fn test_max_frame_size_limit_16mb() {
 
 #[tokio::test]
 async fn test_ast_dlp_secret_redaction_in_stream() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args = vec!["--leak-secret".to_string()];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(256 * 1024);
@@ -541,7 +543,7 @@ async fn test_ast_dlp_secret_redaction_in_stream() {
 
 #[tokio::test]
 async fn test_operator_approval_and_session_cache() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(256 * 1024);
@@ -677,7 +679,7 @@ async fn test_operator_approval_and_session_cache() {
 
 #[tokio::test]
 async fn test_no_prompt_denial_reason_is_truthful() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(256 * 1024);
@@ -738,7 +740,7 @@ async fn test_no_prompt_denial_reason_is_truthful() {
 
 #[tokio::test]
 async fn test_operator_rejection() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(256 * 1024);
@@ -797,7 +799,7 @@ async fn test_operator_rejection() {
 
 #[tokio::test]
 async fn test_stream_audit_logging_and_tamper_evidence() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let tmp_dir = std::env::temp_dir();
@@ -915,7 +917,7 @@ async fn test_stream_audit_logging_and_tamper_evidence() {
 
 #[tokio::test]
 async fn test_stream_monitor_mode_simulated_block_and_bypass() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let tmp_dir = std::env::temp_dir();
@@ -997,7 +999,7 @@ async fn test_stream_monitor_mode_simulated_block_and_bypass() {
 
 #[tokio::test]
 async fn test_protocol_edge_cases_id_preservation_and_notifications() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(256 * 1024);
@@ -1241,7 +1243,7 @@ async fn test_protocol_edge_cases_id_preservation_and_notifications() {
 
 #[tokio::test]
 async fn test_stream_token_optimization_compact_schemas_hidden_tools_and_output_budget() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(256 * 1024);

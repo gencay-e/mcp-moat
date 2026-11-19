@@ -179,13 +179,34 @@ async fn child_environment_is_scrubbed_for_wrap_and_codegen() {
 }
 
 fn get_mock_server_bin() -> PathBuf {
-    let moat = Path::new(get_moat_bin());
-    let bin_dir = moat.parent().expect("Moat binary has parent dir");
-    bin_dir.join(if cfg!(windows) {
-        "mock_server.exe"
-    } else {
-        "mock_server"
+    static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let moat = Path::new(get_moat_bin());
+        let bin_dir = moat.parent().expect("Moat binary has parent dir");
+        let exe = if cfg!(windows) {
+            "mock_server.exe"
+        } else {
+            "mock_server"
+        };
+        let path = bin_dir.join("examples").join(exe);
+        if !path.is_file() {
+            let mut cmd = std::process::Command::new(env!("CARGO"));
+            cmd.args([
+                "build",
+                "--manifest-path",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../mcp-moat-proxy/Cargo.toml"),
+                "--example",
+                "mock_server",
+            ]);
+            if bin_dir.file_name().and_then(|n| n.to_str()) == Some("release") {
+                cmd.arg("--release");
+            }
+            let status = cmd.status().expect("build mock_server example");
+            assert!(status.success(), "failed to build mock_server example");
+        }
+        path
     })
+    .clone()
 }
 
 #[tokio::test]

@@ -335,8 +335,9 @@ def postgres_server(work: Path) -> None:
             return
         connection = f"postgresql://moat:{password}@127.0.0.1:{host_port}/{database}"
         ready = False
-        deadline = time.time() + 60
-        while time.time() < deadline:
+        probe_detail = "postgres readiness deadline elapsed"
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
             probe = subprocess.run(
                 [docker, "exec", container_id, "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "moat", "-d", database],
                 capture_output=True, text=True, timeout=10,
@@ -344,8 +345,9 @@ def postgres_server(work: Path) -> None:
             if probe.returncode == 0:
                 ready = True
                 break
+            probe_detail = probe.stderr or probe.stdout or f"pg_isready exited with {probe.returncode}"
             time.sleep(1)
-        check(ready, "postgres: fixture accepts connections", probe.stderr or probe.stdout)
+        check(ready, "postgres: fixture accepts connections", probe_detail)
         if not ready:
             return
         seed = subprocess.run(

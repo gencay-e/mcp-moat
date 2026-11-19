@@ -7,6 +7,8 @@ use tokio::io::AsyncWriteExt;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, LinesCodec};
 
+mod common;
+
 use mcp_moat_core::{AuditLevel, PolicyConfig, PolicyEngine};
 use mcp_moat_proxy::ProxyServer;
 
@@ -23,7 +25,7 @@ async fn session(
     lines: Vec<Value>,
     expected: usize,
 ) -> Vec<Value> {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let (mut client_tx, proxy_rx) = tokio::io::duplex(256 * 1024);
     let (proxy_tx, client_rx) = tokio::io::duplex(256 * 1024);
     let (proxy_err_tx, _client_err_rx) = tokio::io::duplex(256 * 1024);

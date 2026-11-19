@@ -1,6 +1,6 @@
 param(
     [string]$MoatBin = (Join-Path (Split-Path -Parent $PSScriptRoot) "target\release\moat.exe"),
-    [string]$MockBin = (Join-Path (Split-Path -Parent $PSScriptRoot) "target\release\mock_server.exe"),
+    [string]$MockBin = (Join-Path (Split-Path -Parent $PSScriptRoot) "target\release\examples\mock_server.exe"),
     [string]$AuditLog = (Join-Path (Split-Path -Parent $PSScriptRoot) "target\dry_run_audit.jsonl")
 )
 

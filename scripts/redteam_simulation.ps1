@@ -5,7 +5,7 @@
 
 param(
     [string]$MoatPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "target\release\moat.exe"),
-    [string]$MockServerPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "target\release\mock_server.exe"),
+    [string]$MockServerPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "target\release\examples\mock_server.exe"),
     [string]$AuditLogPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "target\redteam_audit.jsonl")
 )
 

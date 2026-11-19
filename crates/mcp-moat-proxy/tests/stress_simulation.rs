@@ -5,6 +5,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, LinesCodec};
 
+mod common;
+
 use mcp_moat_core::{PolicyConfig, PolicyEngine};
 use mcp_moat_proxy::ProxyServer;
 
@@ -68,7 +70,7 @@ fn format_bytes(bytes: usize) -> String {
 /// 1. Throughput: 2,000 to 5,000 sequential and pipelined JSON-RPC messages through the stream engine.
 #[tokio::test]
 async fn test_stress_1_massive_throughput_sequential_and_pipelined() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let mem_before = get_process_memory_bytes();
@@ -285,7 +287,7 @@ async fn test_stress_1_massive_throughput_sequential_and_pipelined() {
 /// stdin/stdout at the same time.
 #[tokio::test]
 async fn test_stress_2_massive_stderr_overflow_deadlock_prevention() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     // 800,000 bytes dumped continuously on stderr (> 780 KiB, exceeds 500 KiB requirement)
     // Plus 256 bytes stderr per tool-call
     let stderr_dump_target = 800_000;
@@ -413,7 +415,7 @@ async fn test_stress_2_massive_stderr_overflow_deadlock_prevention() {
 /// (-32700), without panic, deadlock or running out of memory.
 #[tokio::test]
 async fn test_stress_3_16mb_frame_ceiling_simulation() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(36 * 1024 * 1024);
@@ -524,7 +526,7 @@ async fn test_stress_3_16mb_frame_ceiling_simulation() {
 /// 4. Under load, an MCP `ping` skips the queue and is answered in under 5 ms.
 #[tokio::test]
 async fn test_stress_4_keepalive_ping_bypass_under_load() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     // Simulate server processing delay of 250ms on tool calls
     let delay_ms = 1000;
     let args = vec!["--delay".to_string(), delay_ms.to_string()];
@@ -642,7 +644,7 @@ async fn test_stress_4_keepalive_ping_bypass_under_load() {
 /// and leave no tasks behind.
 #[tokio::test]
 async fn test_stress_5_abrupt_client_disconnect_broken_pipe() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(1024 * 1024);

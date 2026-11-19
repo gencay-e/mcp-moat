@@ -1292,7 +1292,7 @@ pub fn validate_lexical_syntax(path_str: &str) -> Result<()> {
     }
 
     // 4. Prevent DOS 8.3 short names (PROGRA~1, MOAT~1.TOM). Names that only contain a tilde,
-    //    such as "iCloud~md~obsidian", are ordinary names.
+    //    such as "com~example~app", are ordinary names.
     if has_dos_short_name_segment(trimmed) {
         return Err(MoatError::PolicyViolation(
             "DOS 8.3 short names containing '~' are prohibited".to_string(),

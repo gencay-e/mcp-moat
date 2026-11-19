@@ -10,12 +10,14 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 use mcp_moat_core::{PolicyConfig, PolicyEngine};
 use mcp_moat_proxy::ProxyServer;
 
+mod common;
+
 #[path = "../../mcp-moat-core/tests/common/mod.rs"]
 mod matrix;
 
 #[tokio::test]
 async fn no_prompt_never_forwards_a_call_that_needs_approval() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(256 * 1024);
@@ -121,7 +123,7 @@ fn plain_canonical(p: &std::path::Path) -> std::path::PathBuf {
 #[tokio::test]
 async fn decision_matrix_without_console() {
     use matrix::Exp;
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
 
     let jail = std::env::temp_dir().join(format!("mcp-moat-matrix-jail-{}", std::process::id()));
     std::fs::create_dir_all(jail.join(".git")).unwrap();

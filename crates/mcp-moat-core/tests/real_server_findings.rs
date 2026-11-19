@@ -310,7 +310,7 @@ fn only_real_dos_short_names_are_rejected() {
         );
     }
     for allowed in [
-        "vaults/iCloud~md~obsidian/Shared/note.md",
+        "vaults/com~example~app/notes/note.md",
         "backup~old/file.txt",
         "report~final.docx",
         "a~b",

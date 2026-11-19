@@ -326,7 +326,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 ```
 
-Two PowerShell scripts drive the release binary against the built-in mock server (`cargo build --release --bin moat --bin mock_server` first):
+Two PowerShell scripts drive the release binary against the built-in mock server (`cargo build --release --bin moat --example mock_server` first):
 
 * `scripts/redteam_simulation.ps1`: 33 attack cases (UNC and NT paths, shell injection, traversal, read-only mode, audit log).
 * `scripts/dry_run_simulation.ps1`: monitor mode and the `--strict` audit gate.

@@ -5,6 +5,8 @@ use tokio::io::AsyncWriteExt;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, LinesCodec};
 
+mod common;
+
 use mcp_moat_core::{PolicyConfig, PolicyEngine};
 use mcp_moat_proxy::ProxyServer;
 
@@ -14,7 +16,7 @@ use mcp_moat_proxy::ProxyServer;
 /// - The stream recovers cleanly and subsequent standard JSON-RPC requests on the same stream succeed!
 #[tokio::test]
 async fn test_fuzz_exact_16mb_boundary_and_stream_recovery() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(36 * 1024 * 1024);
@@ -79,7 +81,7 @@ async fn test_fuzz_exact_16mb_boundary_and_stream_recovery() {
 /// Test 2: Non-standard JSON Values, Unicode Escapes, Null Bytes, and Surrogate Pairs
 #[tokio::test]
 async fn test_fuzz_nonstandard_json_unicode_and_null_bytes() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(1024 * 1024);
@@ -166,7 +168,7 @@ async fn test_fuzz_nonstandard_json_unicode_and_null_bytes() {
 /// Test 3: Deep JSON Nesting / Recursion Limits
 #[tokio::test]
 async fn test_fuzz_deep_json_recursion_and_huge_arrays() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(2 * 1024 * 1024);
@@ -227,7 +229,7 @@ async fn test_fuzz_deep_json_recursion_and_huge_arrays() {
 /// Test 4: Stress Pipelined Stream with Interleaved Notifications, Tool Calls, and Priority Pings
 #[tokio::test]
 async fn test_stress_pipelined_interleaved_notifications_and_calls() {
-    let mock_bin = env!("CARGO_BIN_EXE_mock_server");
+    let mock_bin = common::mock_server_bin();
     let args: Vec<String> = vec![];
 
     let (mut client_tx, proxy_rx) = tokio::io::duplex(4 * 1024 * 1024);

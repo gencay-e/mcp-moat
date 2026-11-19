@@ -25,7 +25,7 @@ tracing.workspace = true
 anyhow.workspace = true
 tokio-stream = "0.1.19"
 
-[[bin]]
+[[example]]
 name = "mock_server"
 path = "tests/mock_server.rs"
 test = false

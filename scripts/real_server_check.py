@@ -338,7 +338,7 @@ def postgres_server(work: Path) -> None:
         deadline = time.time() + 60
         while time.time() < deadline:
             probe = subprocess.run(
-                [docker, "exec", container_id, "pg_isready", "-U", "moat", "-d", database],
+                [docker, "exec", container_id, "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "moat", "-d", database],
                 capture_output=True, text=True, timeout=10,
             )
             if probe.returncode == 0:
@@ -349,7 +349,8 @@ def postgres_server(work: Path) -> None:
         if not ready:
             return
         seed = subprocess.run(
-            [docker, "exec", container_id, "psql", "-U", "moat", "-d", database, "-v", "ON_ERROR_STOP=1",
+            [docker, "exec", "-e", f"PGPASSWORD={password}", container_id,
+             "psql", "-h", "127.0.0.1", "-p", "5432", "-U", "moat", "-d", database, "-v", "ON_ERROR_STOP=1",
              "-c", "CREATE TABLE fixture (value text); INSERT INTO fixture VALUES ('postgres-sentinel');"],
             capture_output=True, text=True, timeout=20,
         )
@@ -374,7 +375,8 @@ def postgres_server(work: Path) -> None:
               "postgres: preset blocks generic query pending approval (server tool is query)", text_of(wrapped["read"]))
         check(is_blocked(wrapped["write"]), "postgres: unattended INSERT is blocked", text_of(wrapped["write"]))
         verify = subprocess.run(
-            [docker, "exec", container_id, "psql", "-U", "moat", "-d", database, "-Atqc",
+            [docker, "exec", "-e", f"PGPASSWORD={password}", container_id,
+             "psql", "-h", "127.0.0.1", "-p", "5432", "-U", "moat", "-d", database, "-Atqc",
              "SELECT count(*) || ':' || min(value) FROM fixture"],
             capture_output=True, text=True, timeout=20,
         )

@@ -181,30 +181,54 @@ async fn child_environment_is_scrubbed_for_wrap_and_codegen() {
 fn get_mock_server_bin() -> PathBuf {
     static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
-        let moat = Path::new(get_moat_bin());
-        let bin_dir = moat.parent().expect("Moat binary has parent dir");
         let exe = if cfg!(windows) {
             "mock_server.exe"
         } else {
             "mock_server"
         };
-        let path = bin_dir.join("examples").join(exe);
-        if !path.is_file() {
-            let mut cmd = std::process::Command::new(env!("CARGO"));
-            cmd.args([
-                "build",
-                "--manifest-path",
-                concat!(env!("CARGO_MANIFEST_DIR"), "/../mcp-moat-proxy/Cargo.toml"),
-                "--example",
-                "mock_server",
-            ]);
-            if bin_dir.file_name().and_then(|n| n.to_str()) == Some("release") {
-                cmd.arg("--release");
-            }
-            let status = cmd.status().expect("build mock_server example");
-            assert!(status.success(), "failed to build mock_server example");
+        let moat = Path::new(get_moat_bin());
+        if let Some(found) = moat
+            .ancestors()
+            .map(|dir| dir.join("examples").join(exe))
+            .find(|candidate| candidate.is_file())
+        {
+            return found;
         }
-        path
+
+        let is_release = moat
+            .ancestors()
+            .any(|dir| dir.file_name().and_then(|n| n.to_str()) == Some("release"));
+        let mut cmd = std::process::Command::new(env!("CARGO"));
+        cmd.args([
+            "build",
+            "--manifest-path",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../mcp-moat-proxy/Cargo.toml"),
+            "--example",
+            "mock_server",
+            "--message-format=json-render-diagnostics",
+        ]);
+        if is_release {
+            cmd.arg("--release");
+        }
+        let output = cmd.output().expect("build mock_server example");
+        assert!(
+            output.status.success(),
+            "failed to build mock_server example: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) {
+                if msg.get("reason").and_then(|v| v.as_str()) == Some("compiler-artifact")
+                    && msg.pointer("/target/name").and_then(|v| v.as_str()) == Some("mock_server")
+                {
+                    if let Some(executable) = msg.get("executable").and_then(|v| v.as_str()) {
+                        return PathBuf::from(executable);
+                    }
+                }
+            }
+        }
+        panic!("mock_server example executable not reported by cargo build");
     })
     .clone()
 }

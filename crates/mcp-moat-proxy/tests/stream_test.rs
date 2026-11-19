@@ -548,9 +548,23 @@ async fn test_operator_approval_and_session_cache() {
     let (proxy_tx, client_rx) = tokio::io::duplex(256 * 1024);
     let (proxy_err_tx, _client_err_rx) = tokio::io::duplex(256 * 1024);
 
+    let temp_root = {
+        let p = std::env::temp_dir();
+        #[cfg(windows)]
+        {
+            let c = p.canonicalize().unwrap_or(p);
+            let s = c.to_string_lossy();
+            std::path::PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s))
+        }
+        #[cfg(not(windows))]
+        {
+            p
+        }
+    };
+
     let mut config = PolicyConfig::default();
     config.require_approval_on_write = true; // Force AskOperator on write_file
-    config.allowed_paths = vec![std::env::temp_dir()];
+    config.allowed_paths = vec![temp_root.clone()];
     let policy = PolicyEngine::new(config).unwrap();
 
     // Virtual direct console: operator enters 'a' (AllowAlways) on first prompt
@@ -566,7 +580,7 @@ async fn test_operator_approval_and_session_cache() {
     let mut framed_out =
         FramedRead::new(client_rx, LinesCodec::new_with_max_length(16 * 1024 * 1024));
 
-    let test_file = std::env::temp_dir().join(format!("test_approval_{}.txt", std::process::id()));
+    let test_file = temp_root.join(format!("test_approval_{}.txt", std::process::id()));
     let test_file_str = test_file.to_str().unwrap().replace('\\', "/");
 
     // 1. First write_file call: triggers operator prompt -> operator types 'a' (AllowAlways)
@@ -597,7 +611,7 @@ async fn test_operator_approval_and_session_cache() {
     assert_eq!(resp1.get("id").and_then(|i| i.as_i64()), Some(1));
     assert!(
         resp1.get("result").is_some() && resp1["result"]["isError"] != true,
-        "First write_file should succeed after operator 'a'"
+        "First write_file should succeed after operator 'a': {resp1}"
     );
 
     // 2. Second write_file call: should be auto-approved by session_cache WITHOUT prompting console!
@@ -628,7 +642,7 @@ async fn test_operator_approval_and_session_cache() {
     assert_eq!(resp2.get("id").and_then(|i| i.as_i64()), Some(2));
     assert!(
         resp2.get("result").is_some() && resp2["result"]["isError"] != true,
-        "Second write_file must be auto-approved via SessionApprovalCache"
+        "Second write_file must be auto-approved via SessionApprovalCache: {resp2}"
     );
 
     // The console has no further answers. A different path or tool must be denied.

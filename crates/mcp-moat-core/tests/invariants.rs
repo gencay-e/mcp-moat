@@ -169,6 +169,131 @@ fn inv1_existing_file_cannot_be_used_as_a_path_ancestor() {
 }
 
 #[test]
+fn inv1_symlinked_ancestor_outside_jail_works_but_inside_jail_escape_is_blocked() {
+    let base = {
+        let p = std::env::temp_dir().join(format!(
+            "mcp-moat-ancestor-link-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        let c = p.canonicalize().unwrap();
+        let s = c.to_string_lossy();
+        PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s))
+    };
+
+    let real_parent = base.join("real_parent");
+    let real_jail = real_parent.join("jail");
+    let real_outside = real_parent.join("outside");
+    std::fs::create_dir_all(&real_jail).unwrap();
+    std::fs::create_dir_all(&real_outside).unwrap();
+    std::fs::write(real_jail.join("inside.txt"), "ok").unwrap();
+    std::fs::write(real_outside.join("secret.txt"), "secret").unwrap();
+
+    let alias_parent = base.join("alias_parent");
+    let escape_link = real_jail.join("escape_to_ancestor");
+
+    let make_dir_link = |link: &std::path::Path, target: &std::path::Path| {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("cmd.exe")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap();
+            assert!(
+                status.status.success(),
+                "mklink /J failed: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+        }
+    };
+
+    make_dir_link(&alias_parent, &real_parent);
+    make_dir_link(&escape_link, &real_parent);
+
+    let mut cfg = PolicyConfig::default();
+    cfg.allowed_paths = vec![alias_parent.join("jail")];
+    let e = PolicyEngine::new(cfg).unwrap();
+
+    // 1. Legitimate file reached through symlinked ancestor directory (like macOS /var -> /private/var)
+    let inside_via_alias = alias_parent.join("jail").join("inside.txt");
+    let d_in = e.evaluate_tool_call(&call(
+        "read_file",
+        json!({"path": inside_via_alias.to_string_lossy()}),
+    ));
+    assert!(
+        is_allow(&d_in),
+        "in-jail path via symlinked ancestor {inside_via_alias:?} gave {d_in:?}"
+    );
+
+    // 2. New nested target reached through symlinked ancestor directory
+    let new_via_alias = alias_parent
+        .join("jail")
+        .join("new_sub")
+        .join("created.txt");
+    let d_new = e.evaluate_tool_call(&call(
+        "write_file",
+        json!({"path": new_via_alias.to_string_lossy(), "content": "x"}),
+    ));
+    assert!(
+        is_allow(&d_new),
+        "new nested path via symlinked ancestor {new_via_alias:?} gave {d_new:?}"
+    );
+
+    // 3. The ancestor link itself (no descendants into jail) must stay blocked
+    let d_ancestor = e.evaluate_tool_call(&call(
+        "read_file",
+        json!({"path": alias_parent.to_string_lossy()}),
+    ));
+    assert!(
+        is_block(&d_ancestor),
+        "ancestor symlink itself gave {d_ancestor:?}"
+    );
+
+    // 4. Sibling outside jail reached through symlinked ancestor must stay blocked
+    let outside_via_alias = alias_parent.join("outside").join("secret.txt");
+    let d_out = e.evaluate_tool_call(&call(
+        "read_file",
+        json!({"path": outside_via_alias.to_string_lossy()}),
+    ));
+    assert!(
+        is_block(&d_out),
+        "outside path via symlinked ancestor gave {d_out:?}"
+    );
+
+    // 5. Symlink INSIDE jail pointing back to an ancestor of jail must ALWAYS be blocked
+    for escape_target in [
+        alias_parent
+            .join("jail")
+            .join("escape_to_ancestor")
+            .join("outside")
+            .join("secret.txt"),
+        alias_parent
+            .join("jail")
+            .join("escape_to_ancestor")
+            .join("jail")
+            .join("inside.txt"),
+    ] {
+        let d_esc = e.evaluate_tool_call(&call(
+            "read_file",
+            json!({"path": escape_target.to_string_lossy()}),
+        ));
+        assert!(
+            is_block(&d_esc),
+            "in-jail symlink to ancestor {escape_target:?} gave {d_esc:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir(&escape_link).or_else(|_| std::fs::remove_file(&escape_link));
+    let _ = std::fs::remove_dir(&alias_parent).or_else(|_| std::fs::remove_file(&alias_parent));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
 fn inv1_every_new_path_segment_is_lexically_checked() {
     let e = engine();
     for segment in ["NUL", "file:stream", "PROGRA~1", "%252e%252e"] {

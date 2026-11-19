@@ -949,7 +949,22 @@ impl PolicyEngine {
                                 };
 
                                 let canonical_target = resolved.canonicalize()?;
-                                if !self.is_within_allowed_roots(&canonical_target) {
+                                let before_jail = verified_prefix
+                                    .parent()
+                                    .map(|parent| {
+                                        parent
+                                            .canonicalize()
+                                            .map(|p| !self.is_within_allowed_roots(&p))
+                                    })
+                                    .transpose()?
+                                    .unwrap_or(true);
+                                let is_allowed_prefix_symlink = before_jail
+                                    && has_descendants
+                                    && canonical_target.is_dir()
+                                    && self.is_ancestor_of_allowed_root(&canonical_target);
+                                if !self.is_within_allowed_roots(&canonical_target)
+                                    && !is_allowed_prefix_symlink
+                                {
                                     return Err(MoatError::PathBoundaryViolation {
                                         attempted: canonical_target.display().to_string(),
                                         allowed: self.allowed_roots_summary(),
@@ -1073,6 +1088,12 @@ impl PolicyEngine {
         self.canonical_allowed_roots
             .iter()
             .any(|root| target.starts_with(root))
+    }
+
+    fn is_ancestor_of_allowed_root(&self, target: &Path) -> bool {
+        self.canonical_allowed_roots
+            .iter()
+            .any(|root| root.starts_with(target))
     }
 
     pub fn allowed_roots_summary(&self) -> String {

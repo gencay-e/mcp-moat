@@ -13,6 +13,7 @@ use mcp_moat_proxy::ProxyServer;
 
 #[tokio::test]
 async fn pathless_write_with_command_requires_approval_each_time() {
+    let mock_bin = common::mock_server_bin();
     let (mut input, proxy_input) = tokio::io::duplex(4096);
     let (proxy_output, output) = tokio::io::duplex(4096);
     let mut config = PolicyConfig::default();
@@ -22,13 +23,7 @@ async fn pathless_write_with_command_requires_approval_each_time() {
     let proxy = ProxyServer::with_console(PolicyEngine::new(config).unwrap(), Some(console));
     let proxy_task = tokio::spawn(async move {
         proxy
-            .wrap_and_run_streams(
-                common::mock_server_bin(),
-                &[],
-                proxy_input,
-                proxy_output,
-                tokio::io::sink(),
-            )
+            .wrap_and_run_streams(mock_bin, &[], proxy_input, proxy_output, tokio::io::sink())
             .await
     });
     let mut output = FramedRead::new(output, LinesCodec::new());
@@ -52,6 +47,134 @@ async fn pathless_write_with_command_requires_approval_each_time() {
     }
     drop(input);
     assert_eq!(proxy_task.await.unwrap().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn client_eof_records_cancelled_approval_before_sealing() {
+    struct WaitingOperator {
+        started: Option<tokio::sync::oneshot::Sender<()>>,
+        release: std::sync::mpsc::Receiver<()>,
+        finished: Option<tokio::sync::oneshot::Sender<usize>>,
+        reads: usize,
+    }
+
+    impl std::io::Read for WaitingOperator {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            if let Some(started) = self.started.take() {
+                let _ = started.send(());
+                let _ = self.release.recv();
+            }
+            Ok(0)
+        }
+    }
+
+    impl Drop for WaitingOperator {
+        fn drop(&mut self) {
+            let _ = self.finished.take().unwrap().send(self.reads);
+        }
+    }
+
+    let temp = std::env::var_os("MOAT_TEST_TEMP")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let audit = temp.join(format!(
+        "moat-cancelled-approval-{}.jsonl",
+        std::process::id()
+    ));
+    let (mut input, proxy_input) = tokio::io::duplex(4096);
+    let (proxy_output, output) = tokio::io::duplex(4096);
+    let (started, prompt_started) = tokio::sync::oneshot::channel();
+    let (finished, operator_finished) = tokio::sync::oneshot::channel();
+    let (release_operator, release) = std::sync::mpsc::channel();
+    let console = mcp_moat_tty::DirectConsole::with_io(
+        std::io::BufReader::new(WaitingOperator {
+            started: Some(started),
+            release,
+            finished: Some(finished),
+            reads: 0,
+        }),
+        Vec::new(),
+    );
+    let mut config = PolicyConfig::default();
+    config.require_approval_on_write = true;
+    config.custom_modifying_tools.push("echo".into());
+    let proxy = ProxyServer::with_console(PolicyEngine::new(config).unwrap(), Some(console))
+        .with_audit(audit.clone(), mcp_moat_core::AuditLevel::Full);
+    let mock = common::mock_server_bin();
+    let proxy_task = tokio::spawn(async move {
+        proxy
+            .wrap_and_run_streams(mock, &[], proxy_input, proxy_output, tokio::io::sink())
+            .await
+    });
+
+    let mut call = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "echo", "arguments": {"message": "status"}}
+    });
+    input
+        .write_all(format!("{call}\n").as_bytes())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), prompt_started)
+        .await
+        .expect("operator prompt must start")
+        .unwrap();
+
+    call["id"] = json!(2);
+    let ping = json!({"jsonrpc": "2.0", "id": 3, "method": "ping"});
+    input
+        .write_all(format!("{call}\n{ping}\n").as_bytes())
+        .await
+        .unwrap();
+    let mut output = FramedRead::new(output, LinesCodec::new());
+    let pong = tokio::time::timeout(Duration::from_secs(5), output.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&pong).unwrap()["id"], 3);
+    drop(input);
+
+    let code = tokio::time::timeout(Duration::from_secs(5), proxy_task)
+        .await
+        .expect("shutdown must not wait for operator input")
+        .unwrap()
+        .unwrap();
+    drop(release_operator);
+    assert_eq!(code, 0);
+    let reads = tokio::time::timeout(Duration::from_secs(5), operator_finished)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let content = std::fs::read_to_string(&audit).unwrap();
+    std::fs::remove_file(audit).unwrap();
+    assert_eq!(
+        reads, 1,
+        "the queued request must not prompt after shutdown"
+    );
+    let report =
+        mcp_moat_core::verify_audit_log_with_options(content.as_bytes(), None, true).unwrap();
+    assert!(report.is_valid, "{report:?}");
+    let events: Vec<Value> = content
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.last().unwrap()["method"], "session_end");
+    let calls: Vec<_> = events
+        .iter()
+        .filter(|event| event["method"] == "tools/call")
+        .collect();
+    assert_eq!(
+        calls.len(),
+        2,
+        "pending approval must be recorded before sealing"
+    );
+    for call in calls {
+        assert_eq!(call["tool_name"], "echo");
+        assert_eq!(call["operator_decision"], "Cancelled");
+    }
 }
 
 #[tokio::test]
@@ -675,6 +798,50 @@ async fn test_operator_approval_and_session_cache() {
     drop(client_tx);
     let _ = proxy_handle.await;
     let _ = std::fs::remove_file(&test_file);
+}
+
+#[tokio::test]
+async fn write_approval_expires_when_proxy_starts_another_session() {
+    let mock_bin = common::mock_server_bin();
+    let root = std::env::current_dir().unwrap();
+    let mut config = PolicyConfig::default();
+    config.require_approval_on_write = true;
+    config.custom_modifying_tools.push("echo".into());
+    config.allowed_paths = vec![root.clone()];
+    let console = mcp_moat_tty::DirectConsole::with_io(std::io::Cursor::new(b"a\nn\n"), Vec::new());
+    let proxy = ProxyServer::with_console(PolicyEngine::new(config).unwrap(), Some(console));
+    let request = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "echo", "arguments": {
+            "message": "hello", "path": root.join("session-approval.txt")
+        }}
+    });
+
+    for expected_denial in [false, true] {
+        let (mut input, proxy_input) = tokio::io::duplex(4096);
+        let (proxy_output, output) = tokio::io::duplex(4096);
+        let session =
+            proxy.wrap_and_run_streams(mock_bin, &[], proxy_input, proxy_output, tokio::io::sink());
+        let request = format!("{request}\n");
+        let client = async move {
+            let mut output = FramedRead::new(output, LinesCodec::new());
+            input.write_all(request.as_bytes()).await.unwrap();
+            output.next().await.unwrap().unwrap()
+        };
+        let (code, line) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(session, client)
+        })
+        .await
+        .unwrap();
+        assert_eq!(code.unwrap(), 0);
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], 1);
+        assert_eq!(
+            response["result"]["isError"] == true,
+            expected_denial,
+            "{response}"
+        );
+    }
 }
 
 #[tokio::test]

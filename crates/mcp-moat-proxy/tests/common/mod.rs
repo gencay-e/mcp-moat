@@ -4,26 +4,14 @@ use std::sync::OnceLock;
 pub fn mock_server_bin() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
-        let exe = if cfg!(windows) {
-            "mock_server.exe"
-        } else {
-            "mock_server"
-        };
         let current = std::env::current_exe().expect("test executable path");
-        if let Some(found) = current
-            .ancestors()
-            .map(|dir| dir.join("examples").join(exe))
-            .find(|candidate| candidate.is_file())
-        {
-            return found.to_string_lossy().into_owned();
-        }
-
         let is_release = current
             .ancestors()
             .any(|dir| dir.file_name().and_then(|n| n.to_str()) == Some("release"));
         let mut cmd = std::process::Command::new(env!("CARGO"));
         cmd.args([
             "build",
+            "--locked",
             "--manifest-path",
             concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
             "--example",

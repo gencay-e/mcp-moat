@@ -51,8 +51,9 @@ FAILED: list[str] = []
 
 
 def session(cmd: list[str], calls: list[tuple[str, str, dict]], timeout: int = 90, env: dict | None = None) -> tuple[dict, str]:
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            bufsize=1, env=env)
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            encoding="utf-8", bufsize=1, env=env)
+    proc.stderr.reconfigure(errors="replace")
     lines: queue.Queue = queue.Queue()
 
     def pump() -> None:
@@ -75,10 +76,10 @@ def session(cmd: list[str], calls: list[tuple[str, str, dict]], timeout: int = 9
         proc.stdin.flush()
 
     def receive(wanted: int) -> dict:
-        end = time.time() + timeout
-        while time.time() < end:
+        deadline = time.monotonic() + timeout
+        while (remaining := deadline - time.monotonic()) > 0:
             try:
-                line = lines.get(timeout=1)
+                line = lines.get(timeout=remaining)
             except queue.Empty:
                 continue
             if line is None:
@@ -87,7 +88,7 @@ def session(cmd: list[str], calls: list[tuple[str, str, dict]], timeout: int = 9
                 message = json.loads(line)
             except ValueError:
                 continue
-            if message.get("id") == wanted:
+            if isinstance(message, dict) and message.get("id") == wanted:
                 return message
         return {"error": {"message": "timeout"}}
 
@@ -146,14 +147,13 @@ def git_command() -> list[str] | None:
     return [uvx, f"mcp-server-git=={GIT_SERVER_VERSION}"] if uvx else None
 
 
-def git_server() -> None:
+def git_server(work: Path) -> None:
     print("== git server (mcp-server-git)")
     server = git_command()
     git = shutil.which("git")
     if not server or not git:
         check(False, "git: git and a server launcher are installed")
         return
-    work = Path(tempfile.mkdtemp(prefix="moat-git-"))
     jail, outside = (work / "jail").resolve(), (work / "outside").resolve()
     for folder in (jail / "repo", outside / "repo"):
         folder.mkdir(parents=True)
@@ -190,7 +190,6 @@ def git_server() -> None:
         check(is_blocked(res[label]), f"git: {label} is blocked", text_of(res[label]))
     branches = subprocess.run([git, "branch", "--list"], cwd=outside / "repo", capture_output=True, text=True).stdout
     check("evil" not in branches, "git: no branch was created in the repository outside the jail", branches)
-    shutil.rmtree(work, ignore_errors=True)
 
 
 def everything_server(work: Path) -> None:
@@ -462,13 +461,13 @@ def playwright_server(work: Path) -> None:
         thread.join(timeout=5)
 
 
-def main() -> int:
-    work = Path(tempfile.mkdtemp(prefix="moat-real-"))
+def run_checks(work: Path) -> int:
     jail, outside = (work / "jail").resolve(), (work / "outside").resolve()
     (jail / "sub").mkdir(parents=True)
     (jail / ".ssh").mkdir()
     outside.mkdir()
-    (jail / "a.txt").write_text("hello from inside\n")
+    inside_text = "hello from inside: \u010d\n"
+    (jail / "a.txt").write_text(inside_text, encoding="utf-8")
     (jail / "secrets.env").write_text(
         "GROQ=gsk_A1b2C3d4E5f6G7h8I9j0K1l2\nOPENAI_API_KEY=abcdefgh12345678\nDB_PASSWORD=hunter2hunter2\nDEBUG=1\n")
     (jail / "base64_secret.txt").write_text(
@@ -518,7 +517,8 @@ def main() -> int:
     print(f"== normal mode (jail {J})")
     res, err = session(base + ["--audit-log", str(audit), "--"] + SERVER + [J], calls)
     check(len(res["tools"].get("result", {}).get("tools", [])) >= 10, "tools/list passes through", text_of(res["tools"]))
-    check("hello from inside" in text_of(res["read_inside"]) and not is_blocked(res["read_inside"]), "read inside the jail works", text_of(res["read_inside"]))
+    check(inside_text.strip() in text_of(res["read_inside"]) and not is_blocked(res["read_inside"]),
+          "UTF-8 read inside the jail works", text_of(res["read_inside"]))
     secrets = text_of(res["read_secrets"])
     check("gsk_A1b2" not in secrets, "Groq key is masked", secrets)
     check("abcdefgh12345678" not in secrets, "OPENAI_API_KEY value is masked", secrets)
@@ -558,7 +558,7 @@ def main() -> int:
     check(not is_blocked(res["read_inside"]), "reading still works in read-only mode", text_of(res["read_inside"]))
     check(not is_blocked(res["tree_inside"]), "directory_tree works in read-only mode", text_of(res["tree_inside"]))
 
-    git_server()
+    git_server(work / "git")
     everything_server(work)
     memory_server(work)
     sqlite_server(work)
@@ -566,9 +566,13 @@ def main() -> int:
     postgres_server(work)
     playwright_server(work)
 
-    shutil.rmtree(work, ignore_errors=True)
     print(f"\n{'all checks passed' if not FAILED else str(len(FAILED)) + ' check(s) failed: ' + ', '.join(FAILED)}")
     return 1 if FAILED else 0
+
+
+def main() -> int:
+    with tempfile.TemporaryDirectory(prefix="moat-real-", ignore_cleanup_errors=True) as work:
+        return run_checks(Path(work))
 
 
 if __name__ == "__main__":

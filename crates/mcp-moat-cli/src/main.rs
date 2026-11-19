@@ -228,13 +228,45 @@ fn format_audit_event(event: &AuditEvent) -> String {
         .collect()
 }
 
+fn seek_to_audit_follow_start(
+    file: &mut (impl std::io::Read + std::io::Seek),
+) -> std::io::Result<()> {
+    use std::io::SeekFrom;
+
+    let mut end = file.seek(SeekFrom::End(0))?;
+    let mut block = [0; 8192];
+    // Skip complete records and retain any unfinished record at EOF.
+    while end > 0 {
+        let start = end.saturating_sub(block.len() as u64);
+        let bytes = &mut block[..(end - start) as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(bytes)?;
+        if let Some(newline) = bytes.iter().rposition(|&byte| byte == b'\n') {
+            file.seek(SeekFrom::Start(start + newline as u64 + 1))?;
+            return Ok(());
+        }
+        end = start;
+    }
+    file.seek(SeekFrom::Start(0))?;
+    Ok(())
+}
+
 struct LoadedConfig {
     config: PolicyConfig,
     source: Option<PathBuf>,
 }
 
 fn load_policy_config(config: Option<&Path>) -> Result<LoadedConfig> {
-    let (mut policy_config, source) = if let Some(cfg_path) = config {
+    let cfg_path = config.unwrap_or_else(|| Path::new("moat.toml"));
+    let config_present = config.is_some()
+        || match cfg_path.symlink_metadata() {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                return Err(e).context("Failed to inspect config file 'moat.toml'");
+            }
+        };
+    let (mut policy_config, source) = if config_present {
         let content = std::fs::read_to_string(cfg_path)
             .with_context(|| format!("Failed to read config file '{}'", cfg_path.display()))?;
         let parsed = toml::from_str::<PolicyConfig>(&content).with_context(|| {
@@ -244,10 +276,6 @@ fn load_policy_config(config: Option<&Path>) -> Result<LoadedConfig> {
             )
         })?;
         (parsed, Some(cfg_path.to_path_buf()))
-    } else if Path::new("moat.toml").exists() {
-        let content = std::fs::read_to_string("moat.toml")?;
-        let parsed = toml::from_str::<PolicyConfig>(&content)?;
-        (parsed, Some(PathBuf::from("moat.toml")))
     } else {
         (PolicyConfig::default(), None)
     };
@@ -266,6 +294,23 @@ fn load_policy_config(config: Option<&Path>) -> Result<LoadedConfig> {
         config: policy_config,
         source,
     })
+}
+
+async fn read_codegen_response(
+    reader: &mut tokio::io::Lines<impl tokio::io::AsyncBufRead + Unpin>,
+    id: i64,
+) -> std::io::Result<Option<serde_json::Value>> {
+    while let Some(line) = reader.next_line().await? {
+        let Ok(response) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if response.get("id").and_then(serde_json::Value::as_i64) == Some(id)
+            && response.get("method").is_none()
+        {
+            return Ok(Some(response));
+        }
+    }
+    Ok(None)
 }
 
 #[tokio::main]
@@ -511,10 +556,6 @@ async fn main() -> Result<()> {
                     }
                 };
 
-                let mut stdin = child.stdin.take().context("Failed to open child stdin")?;
-                let stdout = child.stdout.take().context("Failed to open child stdout")?;
-                let mut reader = tokio::io::BufReader::new(stdout).lines();
-
                 let handshake = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -535,40 +576,51 @@ async fn main() -> Result<()> {
                     "method": "tools/list"
                 });
 
-                let payload = format!("{}\n{}\n{}\n", handshake, initialized, tools_req);
-                stdin.write_all(payload.as_bytes()).await?;
-                stdin.flush().await?;
+                let found_tools = async {
+                    let mut stdin = child.stdin.take().context("Failed to open child stdin")?;
+                    let stdout = child.stdout.take().context("Failed to open child stdout")?;
+                    let mut reader = tokio::io::BufReader::new(stdout).lines();
 
-                let found_tools = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                    while let Ok(Some(line)) = reader.next_line().await {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                            let is_id_2 = val.get("id").and_then(|i| i.as_i64()) == Some(2);
-                            let has_tools =
-                                val.get("result").and_then(|r| r.get("tools")).is_some();
-                            if is_id_2 || has_tools {
-                                return Some(val);
-                            }
-                        }
-                    }
-                    None
-                })
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!("Timed out waiting for tools/list response from '{}'", cmd)
-                })?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("MCP server '{}' exited before returning tools/list", cmd)
-                })?;
-
-                drop(stdin);
+                    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                        stdin.write_all(format!("{handshake}\n").as_bytes()).await?;
+                        stdin.flush().await?;
+                        let response =
+                            read_codegen_response(&mut reader, 1)
+                                .await?
+                                .with_context(|| {
+                                    format!(
+                                        "MCP server '{}' exited before returning initialize",
+                                        cmd
+                                    )
+                                })?;
+                        anyhow::ensure!(
+                            response.get("error").is_none()
+                                && response
+                                    .get("result")
+                                    .is_some_and(serde_json::Value::is_object),
+                            "MCP server '{}' rejected initialization",
+                            cmd
+                        );
+                        stdin
+                            .write_all(format!("{initialized}\n{tools_req}\n").as_bytes())
+                            .await?;
+                        stdin.flush().await?;
+                        read_codegen_response(&mut reader, 2)
+                            .await?
+                            .with_context(|| {
+                                format!("MCP server '{}' exited before returning tools/list", cmd)
+                            })
+                    })
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!("Timed out waiting for codegen responses from '{}'", cmd)
+                    })?
+                }
+                .await;
                 let _ = child.kill().await;
                 let _ = child.wait().await;
 
-                found_tools
+                found_tools?
             } else {
                 eprintln!("[moat] Error: Either --from-json <path> or a server command (-- <cmd>) is required for codegen.");
                 std::process::exit(1);
@@ -735,22 +787,25 @@ async fn main() -> Result<()> {
                 }
                 let file = File::open(&path)
                     .with_context(|| format!("Failed to open audit log '{}'", path.display()))?;
-                let reader = BufReader::new(file);
+                let mut reader = BufReader::new(file);
+                let mut line_buf = Vec::new();
 
                 use std::collections::VecDeque;
 
                 if lines > 0 {
-                    let mut ring_buffer: VecDeque<String> = VecDeque::with_capacity(lines);
-                    for line_res in reader.lines() {
-                        let line = line_res?;
+                    let mut ring_buffer = VecDeque::new();
+                    while reader.read_until(b'\n', &mut line_buf)? != 0 {
+                        if follow && !line_buf.ends_with(b"\n") {
+                            break;
+                        }
                         if ring_buffer.len() == lines {
                             ring_buffer.pop_front();
                         }
-                        ring_buffer.push_back(line);
+                        ring_buffer.push_back(std::mem::take(&mut line_buf));
                     }
 
                     for line in &ring_buffer {
-                        match serde_json::from_str::<AuditEvent>(line) {
+                        match serde_json::from_slice::<AuditEvent>(line) {
                             Ok(event) => println!("{}", format_audit_event(&event)),
                             Err(e) => eprintln!("[moat] Warning: Malformed audit record: {}", e),
                         }
@@ -759,27 +814,25 @@ async fn main() -> Result<()> {
 
                 if follow {
                     use tokio::io::AsyncBufReadExt;
-                    use tokio::io::AsyncSeekExt;
 
-                    let mut tokio_file = tokio::fs::File::open(&path).await?;
-                    let _ = tokio_file.seek(std::io::SeekFrom::End(0)).await?;
-                    let mut reader = tokio::io::BufReader::new(tokio_file);
-                    let mut line_buf = String::new();
+                    let mut file = reader.into_inner();
+                    if lines == 0 {
+                        seek_to_audit_follow_start(&mut file)?;
+                    }
+                    let mut reader = tokio::io::BufReader::new(tokio::fs::File::from_std(file));
 
                     loop {
-                        line_buf.clear();
-                        match reader.read_line(&mut line_buf).await {
+                        match reader.read_until(b'\n', &mut line_buf).await {
                             Ok(0) => {
                                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                             }
-                            Ok(_) => {
-                                let trimmed = line_buf.trim();
-                                if !trimmed.is_empty() {
-                                    if let Ok(event) = serde_json::from_str::<AuditEvent>(trimmed) {
-                                        println!("{}", format_audit_event(&event));
-                                    }
+                            Ok(_) if line_buf.ends_with(b"\n") => {
+                                if let Ok(event) = serde_json::from_slice::<AuditEvent>(&line_buf) {
+                                    println!("{}", format_audit_event(&event));
                                 }
+                                line_buf.clear();
                             }
+                            Ok(_) => {}
                             Err(e) => {
                                 eprintln!("[moat] Error reading audit tail: {}", e);
                                 break;
@@ -790,5 +843,28 @@ async fn main() -> Result<()> {
                 Ok(())
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::seek_to_audit_follow_start;
+    use std::io::Cursor;
+
+    #[test]
+    fn audit_follow_without_history_starts_at_the_unfinished_record() {
+        let history = b"complete event\n";
+        let mut input = history.to_vec();
+        input.resize(input.len() + 16_384, b'x');
+        for (bytes, expected_offset) in [
+            (input.as_slice(), history.len() as u64),
+            (history.as_slice(), history.len() as u64),
+            (b"unfinished first event".as_slice(), 0),
+            (b"".as_slice(), 0),
+        ] {
+            let mut file = Cursor::new(bytes);
+            seek_to_audit_follow_start(&mut file).unwrap();
+            assert_eq!(file.position(), expected_offset);
+        }
     }
 }

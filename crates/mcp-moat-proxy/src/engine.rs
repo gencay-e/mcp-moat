@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
@@ -138,6 +138,22 @@ async fn cancel_approval_tasks(tasks: &Mutex<JoinSet<()>>) {
     while tasks.join_next().await.is_some() {}
 }
 
+struct ApprovalAudit<F: FnOnce(&str)>(Option<F>);
+
+impl<F: FnOnce(&str)> ApprovalAudit<F> {
+    fn finish(&mut self, outcome: &str) {
+        if let Some(log) = self.0.take() {
+            log(outcome);
+        }
+    }
+}
+
+impl<F: FnOnce(&str)> Drop for ApprovalAudit<F> {
+    fn drop(&mut self) {
+        self.finish("Cancelled");
+    }
+}
+
 type BoxedAsyncRead = Box<dyn AsyncRead + Unpin + Send>;
 type BoxedAsyncWrite = Box<dyn AsyncWrite + Unpin + Send>;
 
@@ -147,7 +163,7 @@ pub struct ProxyServer {
     console: Arc<Mutex<Option<DirectConsole>>>,
     /// True when approval prompts were disabled on purpose (`--no-prompt`).
     no_prompt: bool,
-    session_cache: Arc<Mutex<SessionApprovalCache>>,
+    next_session_cache: std::sync::Mutex<Arc<Mutex<SessionApprovalCache>>>,
     audit_path: Option<PathBuf>,
     audit_level: AuditLevel,
     audit_write_lock: Arc<std::sync::Mutex<()>>,
@@ -176,7 +192,7 @@ impl ProxyServer {
             policy: Arc::new(policy),
             console: Arc::new(Mutex::new(console)),
             no_prompt: false,
-            session_cache: Arc::new(Mutex::new(SessionApprovalCache::new())),
+            next_session_cache: Default::default(),
             audit_path,
             audit_level,
             audit_write_lock: Arc::new(std::sync::Mutex::new(())),
@@ -199,7 +215,7 @@ impl ProxyServer {
             policy: Arc::new(policy),
             console: Arc::new(Mutex::new(console)),
             no_prompt,
-            session_cache: Arc::new(Mutex::new(SessionApprovalCache::new())),
+            next_session_cache: Default::default(),
             audit_path,
             audit_level,
             audit_write_lock: Arc::new(std::sync::Mutex::new(())),
@@ -215,8 +231,12 @@ impl ProxyServer {
         self
     }
 
+    /// Returns the approval cache for the next session started on this proxy.
     pub fn session_cache(&self) -> Arc<Mutex<SessionApprovalCache>> {
-        Arc::clone(&self.session_cache)
+        self.next_session_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Sets custom I/O streams (useful for integration tests or embedding)
@@ -493,7 +513,12 @@ impl ProxyServer {
         let policy = Arc::clone(&self.policy);
         let console = Arc::clone(&self.console);
         let no_prompt = self.no_prompt;
-        let session_cache = Arc::clone(&self.session_cache);
+        let session_cache = std::mem::take(
+            &mut *self
+                .next_session_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         let client_out_for_inbound = Arc::clone(&client_out_writer);
         let priority_tx_clone = priority_tx.clone();
         let normal_tx_clone = normal_tx.clone();
@@ -985,21 +1010,36 @@ impl ProxyServer {
                                     let is_notification = req.is_notification();
                                     let forward_line = format!("{}\n", trimmed);
                                     let tool_name_cloned = tool_name.clone();
-                                    let target_path_str =
-                                        target_path.as_ref().map(|p| p.display().to_string());
                                     let action_summary_clone = action_summary.clone();
                                     let cached_action_for_prompt = cached_action.clone();
                                     let write_cache_key_for_prompt = write_cache_key.clone();
                                     let canonical_write_targets_for_prompt =
                                         canonical_write_targets.clone();
-                                    let log_approval = log_inbound.clone();
                                     let audit_failed_for_approval =
                                         Arc::clone(&audit_failed_for_inbound);
-                                    let trimmed_clone = if has_audit {
-                                        Some(trimmed.to_string())
-                                    } else {
-                                        None
-                                    };
+                                    // Capture the guard before spawning so even an unpolled task records cancellation.
+                                    let mut approval_audit = ApprovalAudit(has_audit.then(|| {
+                                        let log_approval = log_inbound.clone();
+                                        let audit_tool = tool_name.clone();
+                                        let audit_summary = action_summary.clone();
+                                        let audit_path =
+                                            target_path.map(|p| p.display().to_string());
+                                        let audit_payload = trimmed.to_string();
+                                        move |outcome: &str| {
+                                            log_approval(
+                                                AuditDirection::Inbound,
+                                                "tools/call".to_string(),
+                                                Some(audit_tool),
+                                                audit_path,
+                                                Some(AuditDecision::AskOperator {
+                                                    summary: audit_summary,
+                                                }),
+                                                Some(outcome.to_string()),
+                                                Some(audit_payload),
+                                                None,
+                                            );
+                                        }
+                                    }));
 
                                     approval_tasks_inbound.lock().await.spawn(async move {
                                         let session_cache_for_prompt =
@@ -1008,7 +1048,8 @@ impl ProxyServer {
                                         let action_summary_for_prompt =
                                             action_summary_clone.clone();
 
-                                        let decision = tokio::task::spawn_blocking(move || {
+                                        let (reply, decision) = oneshot::channel();
+                                        tokio::task::spawn_blocking(move || {
                                             // Perform disk I/O and Myers diff in dedicated blocking threadpool
                                             let diff_preview = if let (Some(path), Some(content)) =
                                                 (&diff_target, &diff_content)
@@ -1041,14 +1082,19 @@ impl ProxyServer {
                                                     )
                                                 };
                                                 if allowed {
-                                                    return (
+                                                    let _ = reply.send((
                                                         ApprovalDecision::AllowAlways,
                                                         crate::DenyCause::OperatorRejected,
-                                                    );
+                                                    ));
+                                                    return;
                                                 }
                                             }
 
-                                            if let Some(c) = guard.as_mut() {
+                                            // Shutdown drops the receiver even if this worker is already running.
+                                            if reply.is_closed() {
+                                                return;
+                                            }
+                                            let outcome = if let Some(c) = guard.as_mut() {
                                                 match c.ask_approval_detailed(
                                                     &action_summary_clone,
                                                     diff_preview.as_deref(),
@@ -1068,31 +1114,17 @@ impl ProxyServer {
                                                     ApprovalDecision::Deny,
                                                     crate::DenyCause::NoTerminal,
                                                 )
-                                            }
-                                        })
-                                        .await
-                                        .unwrap_or((
+                                            };
+                                            let _ = reply.send(outcome);
+                                        });
+                                        let (decision, deny_cause) = decision.await.unwrap_or((
                                             ApprovalDecision::Deny,
                                             crate::DenyCause::NoTerminal,
                                         ));
-                                        let (decision, deny_cause) = decision;
 
                                         match decision {
                                             ApprovalDecision::AllowOnce => {
-                                                if has_audit {
-                                                    log_approval(
-                                                        AuditDirection::Inbound,
-                                                        "tools/call".to_string(),
-                                                        Some(tool_name_cloned),
-                                                        target_path_str,
-                                                        Some(AuditDecision::AskOperator {
-                                                            summary: action_summary,
-                                                        }),
-                                                        Some("AllowOnce".to_string()),
-                                                        trimmed_clone,
-                                                        None,
-                                                    );
-                                                }
+                                                approval_audit.finish("AllowOnce");
                                                 if audit_failed_for_approval.load(Ordering::Acquire)
                                                 {
                                                     reply_audit_failed(
@@ -1126,20 +1158,7 @@ impl ProxyServer {
                                                     "Added tool/action for '{}' to session approval cache",
                                                     tool_name_cloned
                                                 );
-                                                if has_audit {
-                                                    log_approval(
-                                                        AuditDirection::Inbound,
-                                                        "tools/call".to_string(),
-                                                        Some(tool_name_cloned),
-                                                        target_path_str,
-                                                        Some(AuditDecision::AskOperator {
-                                                            summary: action_summary,
-                                                        }),
-                                                        Some("AllowAlways".to_string()),
-                                                        trimmed_clone,
-                                                        None,
-                                                    );
-                                                }
+                                                approval_audit.finish("AllowAlways");
                                                 if audit_failed_for_approval.load(Ordering::Acquire)
                                                 {
                                                     reply_audit_failed(
@@ -1157,20 +1176,7 @@ impl ProxyServer {
                                                     "Approval denied ({:?}): {}",
                                                     deny_cause, tool_name_cloned
                                                 );
-                                                if has_audit {
-                                                    log_approval(
-                                                        AuditDirection::Inbound,
-                                                        "tools/call".to_string(),
-                                                        Some(tool_name_cloned),
-                                                        target_path_str,
-                                                        Some(AuditDecision::AskOperator {
-                                                            summary: action_summary,
-                                                        }),
-                                                        Some("Deny".to_string()),
-                                                        trimmed_clone,
-                                                        None,
-                                                    );
-                                                }
+                                                approval_audit.finish("Deny");
                                                 if !is_notification {
                                                     let error_resp =
                                                         JsonRpcResponse::tool_error_result(

@@ -83,3 +83,19 @@ fn disabling_scrubbing_never_exposes_audit_key() {
     assert!(filtered.iter().any(|name| name == "GITHUB_TOKEN"));
     assert!(!filtered.iter().any(|name| name == "MOAT_AUDIT_KEY"));
 }
+
+#[test]
+fn pass_environment_uses_platform_case_rules_for_unicode_names() {
+    let entry = (OsString::from("r\u{e9}sum\u{e9}"), OsString::from("value"));
+    let config = PolicyConfig {
+        clear_env: true,
+        pass_env: vec!["R\u{c9}SUM\u{c9}".into()],
+        ..PolicyConfig::default()
+    };
+    let filtered = filter_environment([entry.clone()], &config);
+    if cfg!(windows) {
+        assert_eq!(filtered, [entry]);
+    } else {
+        assert!(filtered.is_empty());
+    }
+}

@@ -12,6 +12,7 @@ async fn main() -> anyhow::Result<()> {
     let mut delay_ms: u64 = 0;
     let mut leak_secret = false;
     let mut stderr_on_call: usize = 0;
+    let mut reject_initialize = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -25,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
                 stderr.write_all(&vec![b'x'; 256 * 1024]).await?;
                 stderr.flush().await?;
             }
+            "--reject-initialize" => reject_initialize = true,
             "--expect-env-present" | "--expect-env-absent" => {
                 let name = args.next().expect("environment name required");
                 let present = std::env::var_os(&name).is_some();
@@ -107,6 +109,18 @@ async fn main() -> anyhow::Result<()> {
             .and_then(|m| m.as_str())
             .unwrap_or("")
             .to_string();
+
+        if reject_initialize && method == "initialize" {
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "Initialization rejected"}
+            });
+            let mut out = stdout.lock().await;
+            out.write_all(format!("{response}\n").as_bytes()).await?;
+            out.flush().await?;
+            continue;
+        }
 
         let stdout_clone = Arc::clone(&stdout);
         tokio::spawn(async move {

@@ -108,6 +108,65 @@ async fn codegen_handles_verbose_server_startup() {
 }
 
 #[tokio::test]
+async fn codegen_stops_when_server_rejects_initialization() {
+    let output = Command::new(get_moat_bin())
+        .args(["codegen", "--format", "ts", "--"])
+        .arg(get_mock_server_bin())
+        .arg("--reject-initialize")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "codegen ignored initialization rejection"
+    );
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("rejected initialization"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn codegen_reaps_server_after_stdout_closes() {
+    let pid_file = std::env::temp_dir().join(format!("moat-codegen-pid-{}", std::process::id()));
+    let result = Command::new(get_moat_bin())
+        .args([
+            "codegen",
+            "--",
+            "sh",
+            "-c",
+            r#"printf '%s\n' "$$" > "$1"; exec 1>&-; exec sleep 30"#,
+            "codegen-fixture",
+        ])
+        .arg(&pid_file)
+        .output()
+        .await
+        .unwrap();
+    let pid: u32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    std::fs::remove_file(pid_file).unwrap();
+    let still_running = Command::new("sh")
+        .args([
+            "-c",
+            r#"kill -0 "$1" 2>/dev/null && kill -KILL "$1""#,
+            "check-fixture",
+        ])
+        .arg(pid.to_string())
+        .status()
+        .await
+        .unwrap()
+        .success();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("before returning initialize"));
+    assert!(
+        !still_running,
+        "codegen left its server running after an error"
+    );
+}
+
+#[tokio::test]
 async fn child_environment_is_scrubbed_for_wrap_and_codegen() {
     let directory = std::env::temp_dir().join(format!("moat-env-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
@@ -181,26 +240,14 @@ async fn child_environment_is_scrubbed_for_wrap_and_codegen() {
 fn get_mock_server_bin() -> PathBuf {
     static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
-        let exe = if cfg!(windows) {
-            "mock_server.exe"
-        } else {
-            "mock_server"
-        };
         let moat = Path::new(get_moat_bin());
-        if let Some(found) = moat
-            .ancestors()
-            .map(|dir| dir.join("examples").join(exe))
-            .find(|candidate| candidate.is_file())
-        {
-            return found;
-        }
-
         let is_release = moat
             .ancestors()
             .any(|dir| dir.file_name().and_then(|n| n.to_str()) == Some("release"));
         let mut cmd = std::process::Command::new(env!("CARGO"));
         cmd.args([
             "build",
+            "--locked",
             "--manifest-path",
             concat!(env!("CARGO_MANIFEST_DIR"), "/../mcp-moat-proxy/Cargo.toml"),
             "--example",
@@ -805,7 +852,85 @@ async fn test_cli_audit_tail_ring_buffer() {
     assert!(stdout.contains("ping_19"));
     assert!(stdout.contains("ping_20"));
 
+    let large_count_output = Command::new(moat)
+        .args(["audit", "tail"])
+        .arg(&audit_log)
+        .arg("-n")
+        .arg(usize::MAX.to_string())
+        .output()
+        .await
+        .unwrap();
     let _ = std::fs::remove_file(&audit_log);
+    assert!(
+        large_count_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&large_count_output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&large_count_output.stdout)
+            .lines()
+            .count(),
+        20
+    );
+}
+
+#[tokio::test]
+async fn audit_tail_follow_keeps_an_incomplete_record_at_startup() {
+    use mcp_moat_core::audit::{AuditChain, AuditDecision, AuditDirection};
+    use std::io::Write;
+
+    let path = std::env::temp_dir().join(format!("cli_tail_follow_{}.jsonl", std::process::id()));
+    let mut chain = AuditChain::new("sess-tail-follow");
+    let mut record = |method: &str| {
+        serde_json::to_vec(&chain.create_event(
+            "2026-10-24T00:00:00Z".into(),
+            AuditDirection::Inbound,
+            method.into(),
+            None,
+            None,
+            Some(AuditDecision::Allow),
+            None,
+            None,
+            None,
+        ))
+        .unwrap()
+    };
+    let ready = record("tail_ready");
+    let partial = record("tail_completed");
+    let split = partial.len() / 2;
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(&ready).unwrap();
+    file.write_all(b"\n").unwrap();
+    file.write_all(&partial[..split]).unwrap();
+    drop(file);
+
+    let mut child = Command::new(get_moat_bin())
+        .args(["audit", "tail", "--follow"])
+        .arg(&path)
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
+    let deadline = Duration::from_secs(3);
+    let result = tokio::time::timeout(deadline, async {
+        let first = output.next_line().await.unwrap().unwrap();
+        assert!(first.contains("tail_ready"), "{first}");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&partial[split..]).unwrap();
+        file.write_all(b"\n").unwrap();
+        output.next_line().await.unwrap()
+    })
+    .await;
+    child.kill().await.unwrap();
+    std::fs::remove_file(path).unwrap();
+    let second = result
+        .expect("completed audit record should be displayed")
+        .unwrap();
+    assert!(second.contains("tail_completed"), "{second}");
 }
 
 #[tokio::test]
@@ -1225,6 +1350,30 @@ async fn test_cli_check_valid_config() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Config OK"));
     assert!(stdout.contains("Allowed roots"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_cli_check_rejects_dangling_default_config() {
+    let dir = std::env::temp_dir().join(format!("moat_check_dangling_{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let config = dir.join("moat.toml");
+    std::os::unix::fs::symlink("missing.toml", &config).unwrap();
+
+    let output = Command::new(get_moat_bin())
+        .arg("check")
+        .current_dir(&dir)
+        .output()
+        .await
+        .unwrap();
+
+    std::fs::remove_file(config).unwrap();
+    std::fs::remove_dir(dir).unwrap();
+    assert!(
+        !output.status.success(),
+        "check accepted an unreadable policy"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("moat.toml"));
 }
 
 #[tokio::test]

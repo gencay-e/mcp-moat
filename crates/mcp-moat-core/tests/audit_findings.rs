@@ -313,6 +313,16 @@ fn test_audit_p1_3_reserved_device_names_in_subdirectories_and_expanded_devices(
     assert!(validate_lexical_syntax(r"subdir/CLOCK$/file").is_err());
 }
 
+#[test]
+fn windows_device_names_with_superscript_digits_are_reserved() {
+    for port in ["COM", "LPT"] {
+        for digit in ['\u{b9}', '\u{b2}', '\u{b3}'] {
+            let path = format!("folder/{port}{digit}.txt");
+            assert!(validate_lexical_syntax(&path).is_err(), "accepted {path}");
+        }
+    }
+}
+
 // Backslash is a path separator only on Windows.
 #[cfg(windows)]
 #[test]

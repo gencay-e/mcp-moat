@@ -863,9 +863,16 @@ mod tests {
 #[cfg(test)]
 mod keyed_contract_tests {
     use super::*;
+    use std::hash::{BuildHasher, RandomState};
+
     #[test]
     fn keyed_seal_rejects_missing_wrong_key_and_truncation() {
-        let mut chain = AuditChain::with_key("session", Some(b"secret".to_vec()));
+        let key = RandomState::new()
+            .hash_one(std::process::id())
+            .to_le_bytes();
+        let mut wrong_key = key;
+        wrong_key[0] ^= 1;
+        let mut chain = AuditChain::with_key("session", Some(key.to_vec()));
         let first = chain.create_event(
             "now".into(),
             AuditDirection::Internal,
@@ -894,7 +901,7 @@ mod keyed_contract_tests {
             serde_json::to_string(&end).unwrap()
         );
         assert!(
-            verify_audit_log_with_options(full.as_bytes(), Some(b"secret"), true)
+            verify_audit_log_with_options(full.as_bytes(), Some(&key), true)
                 .unwrap()
                 .is_valid
         );
@@ -904,13 +911,13 @@ mod keyed_contract_tests {
                 .is_valid
         );
         assert!(
-            !verify_audit_log_with_options(full.as_bytes(), Some(b"wrong"), true)
+            !verify_audit_log_with_options(full.as_bytes(), Some(&wrong_key), true)
                 .unwrap()
                 .is_valid
         );
         let truncated = format!("{}\n", serde_json::to_string(&first).unwrap());
         assert!(
-            !verify_audit_log_with_options(truncated.as_bytes(), Some(b"secret"), true)
+            !verify_audit_log_with_options(truncated.as_bytes(), Some(&key), true)
                 .unwrap()
                 .is_valid
         );
@@ -928,7 +935,7 @@ mod keyed_contract_tests {
         );
         let data = format!("{}\n", serde_json::to_string(&event).unwrap());
         assert!(
-            !verify_audit_log_with_options(data.as_bytes(), Some(b"secret"), true)
+            !verify_audit_log_with_options(data.as_bytes(), Some(&key), true)
                 .unwrap()
                 .is_valid
         );

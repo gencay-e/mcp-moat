@@ -3,6 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/mcp-moat.svg)](https://crates.io/crates/mcp-moat)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/gencay-e/mcp-moat/blob/main/LICENSE)
 [![CI](https://github.com/gencay-e/mcp-moat/actions/workflows/ci.yml/badge.svg)](https://github.com/gencay-e/mcp-moat/actions/workflows/ci.yml)
+[![Glama](https://glama.ai/mcp/servers/gencay-e/mcp-moat/badges/score.svg)](https://glama.ai/mcp/servers/gencay-e/mcp-moat)
 
 A policy proxy for MCP servers, written in Rust. `moat` sits between an MCP client (for example Claude Desktop, Claude Code, Cursor) and an MCP server that talks JSON-RPC over stdio. It checks tool calls against a policy, masks secrets in server output, can ask the operator before sensitive actions, and can reduce the size of tool schemas and outputs.
 
